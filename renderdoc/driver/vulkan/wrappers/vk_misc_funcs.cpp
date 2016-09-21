@@ -134,6 +134,8 @@ void WrappedVulkan::vkDestroyImage(VkDevice device, VkImage obj,
   if(obj == VK_NULL_HANDLE)
     return;
 
+  RDCLOG("vkDestroyImage(%llu)", GetResID(obj));
+
   {
     SCOPED_LOCK(m_ImageLayoutsLock);
     m_ImageLayouts.erase(GetResID(obj));

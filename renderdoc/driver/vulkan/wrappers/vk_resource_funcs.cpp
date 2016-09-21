@@ -340,6 +340,8 @@ void WrappedVulkan::vkFreeMemory(VkDevice device, VkDeviceMemory memory,
   // we just need to clean up after ourselves on replay
   WrappedVkNonDispRes *wrapped = (WrappedVkNonDispRes *)GetWrapped(memory);
 
+  RDCLOG("vkFreeMemory(%llu)", wrapped->id);
+
   VkDeviceMemory unwrappedMem = wrapped->real.As<VkDeviceMemory>();
 
   if(m_State >= WRITING)

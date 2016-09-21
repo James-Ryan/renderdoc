@@ -920,13 +920,23 @@ void ResourceManager<WrappedResourceType, RealResourceType, RecordType>::Prepare
     ResourceId id = *it;
 
     if(!HasCurrentResource(id))
+    {
+#if VERBOSE_DIRTY_RESOURCES
+      RDCDEBUG("No current resource %llu", id);
+#endif
       continue;
+    }
 
     RecordType *record = GetResourceRecord(id);
     WrappedResourceType res = GetCurrentResource(id);
 
     if(record == NULL || record->SpecialResource)
+    {
+#if VERBOSE_DIRTY_RESOURCES
+      RDCDEBUG("No record, or special resource for %llu (%p)", id, record);
+#endif
       continue;
+    }
 
     prepared++;
 
