@@ -262,6 +262,8 @@ VkResult WrappedVulkan::vkAllocateMemory(VkDevice device, const VkMemoryAllocate
   {
     ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pMemory);
 
+    RDCLOG("vkAllocateMemory(%llu) => %llu", pAllocateInfo->allocationSize, id);
+
     if(m_State >= WRITING)
     {
       Chunk *chunk = NULL;
@@ -1051,6 +1053,9 @@ VkResult WrappedVulkan::vkCreateImage(VkDevice device, const VkImageCreateInfo *
   if(ret == VK_SUCCESS)
   {
     ResourceId id = GetResourceManager()->WrapResource(Unwrap(device), *pImage);
+
+    RDCLOG("vkCreateImage(%u, %u, %s) => %llu", pCreateInfo->extent.width,
+           pCreateInfo->extent.height, ToStr::Get(pCreateInfo->format).c_str(), id);
 
     if(m_State >= WRITING)
     {

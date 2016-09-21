@@ -55,7 +55,7 @@ enum FrameRefType
 
 // verbose prints with IDs of each dirty resource and whether it was prepared,
 // and whether it was serialised.
-#define VERBOSE_DIRTY_RESOURCES 0
+#define VERBOSE_DIRTY_RESOURCES 1
 
 namespace ResourceIDGen
 {
@@ -624,6 +624,9 @@ void ResourceManager<WrappedResourceType, RealResourceType, RecordType>::MarkDir
 
   if(res == ResourceId())
     return;
+
+  if(m_DirtyResources.find(res) == m_DirtyResources.end())
+    RDCLOG("Marked new dirty resource %llu", res);
 
   m_DirtyResources.insert(res);
 }
