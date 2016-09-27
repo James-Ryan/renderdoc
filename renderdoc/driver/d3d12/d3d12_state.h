@@ -108,10 +108,6 @@ struct D3D12RenderState
         ID3D12Resource *res = rm->GetCurrentAs<ID3D12Resource>(id);
         cmd->SetGraphicsRootUnorderedAccessView(slot, res->GetGPUVirtualAddress() + offset);
       }
-      else
-      {
-        RDCWARN("Unexpected root signature element of type '%u' - skipping.", type);
-      }
     }
 
     void SetToCompute(D3D12ResourceManager *rm, ID3D12GraphicsCommandList *cmd, UINT slot)
@@ -142,10 +138,6 @@ struct D3D12RenderState
         ID3D12Resource *res = rm->GetCurrentAs<ID3D12Resource>(id);
         cmd->SetComputeRootUnorderedAccessView(slot, res->GetGPUVirtualAddress() + offset);
       }
-      else
-      {
-        RDCWARN("Unexpected root signature element of type '%u' - skipping.", type);
-      }
     }
 
     SignatureElementType type;
@@ -157,7 +149,18 @@ struct D3D12RenderState
 
   vector<ResourceId> heaps;
 
-  struct Pipeline
+  struct StreamOut
+  {
+    ResourceId buf;
+    UINT64 offs;
+    UINT64 size;
+
+    ResourceId countbuf;
+    UINT64 countoffs;
+  };
+  vector<StreamOut> streamouts;
+
+  struct RootSignature
   {
     ResourceId rootsig;
 

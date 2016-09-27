@@ -33,6 +33,9 @@
 #include "driver/shaders/dxbc/dxbc_compile.h"
 #include "serialise/serialiser.h"
 
+void MakeShaderReflection(DXBC::DXBCFile *dxbc, ShaderReflection *refl,
+                          ShaderBindpointMapping *mapping);
+
 // similar to RDCUNIMPLEMENTED but for things that are hit often so we don't want to fire the
 // debugbreak.
 #define D3D12NOTIMP(...)                                \
@@ -54,6 +57,7 @@
 // buffer replay is happening
 #define VERBOSE_PARTIAL_REPLAY
 
+ShaderStageBits ConvertVisibility(D3D12_SHADER_VISIBILITY ShaderVisibility);
 UINT GetNumSubresources(const D3D12_RESOURCE_DESC *desc);
 
 class WrappedID3D12Device;
@@ -122,7 +126,7 @@ public:
 
 struct D3D12RootSignatureParameter : D3D12_ROOT_PARAMETER
 {
-  void MakeFrom(const D3D12_ROOT_PARAMETER &param)
+  void MakeFrom(const D3D12_ROOT_PARAMETER &param, UINT &numSpaces)
   {
     ParameterType = param.ParameterType;
     ShaderVisibility = param.ShaderVisibility;
@@ -135,10 +139,22 @@ struct D3D12RootSignatureParameter : D3D12_ROOT_PARAMETER
     {
       ranges.resize(param.DescriptorTable.NumDescriptorRanges);
       for(size_t i = 0; i < ranges.size(); i++)
+      {
         ranges[i] = param.DescriptorTable.pDescriptorRanges[i];
+
+        numSpaces = RDCMAX(numSpaces, ranges[i].RegisterSpace + 1);
+      }
 
       DescriptorTable.NumDescriptorRanges = (UINT)ranges.size();
       DescriptorTable.pDescriptorRanges = &ranges[0];
+    }
+    else if(ParameterType == D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS)
+    {
+      numSpaces = RDCMAX(numSpaces, Constants.RegisterSpace + 1);
+    }
+    else
+    {
+      numSpaces = RDCMAX(numSpaces, Descriptor.RegisterSpace + 1);
     }
   }
 
@@ -147,6 +163,8 @@ struct D3D12RootSignatureParameter : D3D12_ROOT_PARAMETER
 
 struct D3D12RootSignature
 {
+  D3D12RootSignature() : numSpaces(0) {}
+  uint32_t numSpaces;
   vector<D3D12RootSignatureParameter> params;
   vector<D3D12_STATIC_SAMPLER_DESC> samplers;
 };
@@ -167,7 +185,11 @@ void Serialiser::Serialise(const char *name, D3D12_SHADER_BYTECODE &el);
 template <>
 void Serialiser::Serialise(const char *name, D3D12_GRAPHICS_PIPELINE_STATE_DESC &el);
 template <>
+void Serialiser::Deserialise(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *const el) const;
+template <>
 void Serialiser::Serialise(const char *name, D3D12_COMPUTE_PIPELINE_STATE_DESC &el);
+template <>
+void Serialiser::Deserialise(const D3D12_COMPUTE_PIPELINE_STATE_DESC *const el) const;
 template <>
 void Serialiser::Serialise(const char *name, D3D12_INDEX_BUFFER_VIEW &el);
 template <>
@@ -206,6 +228,8 @@ template <>
 void Serialiser::Serialise(const char *name, D3D12_TEXTURE_COPY_LOCATION &el);
 template <>
 void Serialiser::Serialise(const char *name, D3D12_DISCARD_REGION &el);
+template <>
+void Serialiser::Deserialise(const D3D12_DISCARD_REGION *const el) const;
 
 struct D3D12Descriptor;
 template <>
@@ -234,7 +258,6 @@ void Serialiser::Serialise(const char *name, D3D12Descriptor &el);
                                                                                                    \
   D3D12_CHUNK_MACRO(CREATE_COMMAND_QUEUE, "ID3D12Device::CreateCommandQueue")                      \
   D3D12_CHUNK_MACRO(CREATE_COMMAND_ALLOCATOR, "ID3D12Device::CreateCommandAllocator")              \
-  D3D12_CHUNK_MACRO(CREATE_COMMAND_LIST, "ID3D12Device::CreateCommandList")                        \
                                                                                                    \
   D3D12_CHUNK_MACRO(CREATE_GRAPHICS_PIPE, "ID3D12Device::CreateGraphicsPipeline")                  \
   D3D12_CHUNK_MACRO(CREATE_COMPUTE_PIPE, "ID3D12Device::CreateComputePipeline")                    \

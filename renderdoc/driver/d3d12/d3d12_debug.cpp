@@ -830,10 +830,15 @@ D3D12RootSignature D3D12DebugManager::GetRootSig(const void *data, size_t dataSi
   ret.params.resize(desc->NumParameters);
 
   for(size_t i = 0; i < ret.params.size(); i++)
-    ret.params[i].MakeFrom(desc->pParameters[i]);
+    ret.params[i].MakeFrom(desc->pParameters[i], ret.numSpaces);
 
   if(desc->NumStaticSamplers > 0)
+  {
     ret.samplers.assign(desc->pStaticSamplers, desc->pStaticSamplers + desc->NumStaticSamplers);
+
+    for(size_t i = 0; i < ret.samplers.size(); i++)
+      ret.numSpaces = RDCMAX(ret.numSpaces, ret.samplers[i].RegisterSpace + 1);
+  }
 
   SAFE_RELEASE(deser);
 
@@ -1386,6 +1391,491 @@ void D3D12DebugManager::PickPixel(ResourceId texture, uint32_t x, uint32_t y, ui
     m_ReadbackBuffer->Unmap(0, &range);
 }
 
+void D3D12DebugManager::FillCBufferVariables(const string &prefix, size_t &offset, bool flatten,
+                                             const vector<DXBC::CBufferVariable> &invars,
+                                             vector<ShaderVariable> &outvars,
+                                             const vector<byte> &data)
+{
+  using namespace DXBC;
+  using namespace ShaderDebug;
+
+  size_t o = offset;
+
+  for(size_t v = 0; v < invars.size(); v++)
+  {
+    size_t vec = o + invars[v].descriptor.offset / 16;
+    size_t comp = (invars[v].descriptor.offset - (invars[v].descriptor.offset & ~0xf)) / 4;
+    size_t sz = RDCMAX(1U, invars[v].type.descriptor.bytesize / 16);
+
+    offset = vec + sz;
+
+    string basename = prefix + invars[v].name;
+
+    uint32_t rows = invars[v].type.descriptor.rows;
+    uint32_t cols = invars[v].type.descriptor.cols;
+    uint32_t elems = RDCMAX(1U, invars[v].type.descriptor.elements);
+
+    if(!invars[v].type.members.empty())
+    {
+      char buf[64] = {0};
+      StringFormat::snprintf(buf, 63, "[%d]", elems);
+
+      ShaderVariable var;
+      var.name = basename;
+      var.rows = var.columns = 0;
+      var.type = eVar_Float;
+
+      std::vector<ShaderVariable> varmembers;
+
+      if(elems > 1)
+      {
+        for(uint32_t i = 0; i < elems; i++)
+        {
+          StringFormat::snprintf(buf, 63, "[%d]", i);
+
+          if(flatten)
+          {
+            FillCBufferVariables(basename + buf + ".", vec, flatten, invars[v].type.members,
+                                 outvars, data);
+          }
+          else
+          {
+            ShaderVariable vr;
+            vr.name = basename + buf;
+            vr.rows = vr.columns = 0;
+            vr.type = eVar_Float;
+
+            std::vector<ShaderVariable> mems;
+
+            FillCBufferVariables("", vec, flatten, invars[v].type.members, mems, data);
+
+            vr.isStruct = true;
+
+            vr.members = mems;
+
+            varmembers.push_back(vr);
+          }
+        }
+
+        var.isStruct = false;
+      }
+      else
+      {
+        var.isStruct = true;
+
+        if(flatten)
+          FillCBufferVariables(basename + ".", vec, flatten, invars[v].type.members, outvars, data);
+        else
+          FillCBufferVariables("", vec, flatten, invars[v].type.members, varmembers, data);
+      }
+
+      if(!flatten)
+      {
+        var.members = varmembers;
+        outvars.push_back(var);
+      }
+
+      continue;
+    }
+
+    if(invars[v].type.descriptor.varClass == CLASS_OBJECT ||
+       invars[v].type.descriptor.varClass == CLASS_STRUCT ||
+       invars[v].type.descriptor.varClass == CLASS_INTERFACE_CLASS ||
+       invars[v].type.descriptor.varClass == CLASS_INTERFACE_POINTER)
+    {
+      RDCWARN("Unexpected variable '%s' of class '%u' in cbuffer, skipping.",
+              invars[v].name.c_str(), invars[v].type.descriptor.type);
+      continue;
+    }
+
+    size_t elemByteSize = 4;
+    VarType type = eVar_Float;
+    switch(invars[v].type.descriptor.type)
+    {
+      case VARTYPE_INT: type = eVar_Int; break;
+      case VARTYPE_FLOAT: type = eVar_Float; break;
+      case VARTYPE_BOOL:
+      case VARTYPE_UINT:
+      case VARTYPE_UINT8: type = eVar_UInt; break;
+      case VARTYPE_DOUBLE:
+        elemByteSize = 8;
+        type = eVar_Double;
+        break;
+      default:
+        RDCERR("Unexpected type %d for variable '%s' in cbuffer", invars[v].type.descriptor.type,
+               invars[v].name.c_str());
+    }
+
+    bool columnMajor = invars[v].type.descriptor.varClass == CLASS_MATRIX_COLUMNS;
+
+    size_t outIdx = vec;
+    if(!flatten)
+    {
+      outIdx = outvars.size();
+      outvars.resize(RDCMAX(outIdx + 1, outvars.size()));
+    }
+    else
+    {
+      if(columnMajor)
+        outvars.resize(RDCMAX(outIdx + cols * elems, outvars.size()));
+      else
+        outvars.resize(RDCMAX(outIdx + rows * elems, outvars.size()));
+    }
+
+    size_t dataOffset = vec * sizeof(Vec4f) + comp * sizeof(float);
+
+    if(outvars[outIdx].name.count > 0)
+    {
+      RDCASSERT(flatten);
+
+      RDCASSERT(outvars[vec].rows == 1);
+      RDCASSERT(outvars[vec].columns == comp);
+      RDCASSERT(rows == 1);
+
+      string combinedName = outvars[outIdx].name.elems;
+      combinedName += ", " + basename;
+      outvars[outIdx].name = combinedName;
+      outvars[outIdx].rows = 1;
+      outvars[outIdx].isStruct = false;
+      outvars[outIdx].columns += cols;
+
+      if(dataOffset < data.size())
+      {
+        const byte *d = &data[dataOffset];
+
+        memcpy(&outvars[outIdx].value.uv[comp], d,
+               RDCMIN(data.size() - dataOffset, elemByteSize * cols));
+      }
+    }
+    else
+    {
+      outvars[outIdx].name = basename;
+      outvars[outIdx].rows = 1;
+      outvars[outIdx].type = type;
+      outvars[outIdx].isStruct = false;
+      outvars[outIdx].columns = cols;
+
+      ShaderVariable &var = outvars[outIdx];
+
+      bool isArray = invars[v].type.descriptor.elements > 1;
+
+      if(rows * elems == 1)
+      {
+        if(dataOffset < data.size())
+        {
+          const byte *d = &data[dataOffset];
+
+          memcpy(&outvars[outIdx].value.uv[flatten ? comp : 0], d,
+                 RDCMIN(data.size() - dataOffset, elemByteSize * cols));
+        }
+      }
+      else if(!isArray && !flatten)
+      {
+        outvars[outIdx].rows = rows;
+
+        if(dataOffset < data.size())
+        {
+          const byte *d = &data[dataOffset];
+
+          RDCASSERT(rows <= 4 && rows * cols <= 16);
+
+          if(columnMajor)
+          {
+            uint32_t tmp[16] = {0};
+
+            // matrices always have 4 columns, for padding reasons (the same reason arrays
+            // put every element on a new vec4)
+            for(uint32_t c = 0; c < cols; c++)
+            {
+              size_t srcoffs = 4 * elemByteSize * c;
+              size_t dstoffs = rows * elemByteSize * c;
+              memcpy((byte *)(tmp) + dstoffs, d + srcoffs,
+                     RDCMIN(data.size() - dataOffset + srcoffs, elemByteSize * rows));
+            }
+
+            // transpose
+            for(size_t r = 0; r < rows; r++)
+              for(size_t c = 0; c < cols; c++)
+                outvars[outIdx].value.uv[r * cols + c] = tmp[c * rows + r];
+          }
+          else    // CLASS_MATRIX_ROWS or other data not to transpose.
+          {
+            // matrices always have 4 columns, for padding reasons (the same reason arrays
+            // put every element on a new vec4)
+            for(uint32_t r = 0; r < rows; r++)
+            {
+              size_t srcoffs = 4 * elemByteSize * r;
+              size_t dstoffs = cols * elemByteSize * r;
+              memcpy((byte *)(&outvars[outIdx].value.uv[0]) + dstoffs, d + srcoffs,
+                     RDCMIN(data.size() - dataOffset + srcoffs, elemByteSize * cols));
+            }
+          }
+        }
+      }
+      else if(rows * elems > 1)
+      {
+        char buf[64] = {0};
+
+        var.name = outvars[outIdx].name;
+
+        vector<ShaderVariable> varmembers;
+        vector<ShaderVariable> *out = &outvars;
+        size_t rowCopy = 1;
+
+        uint32_t registers = rows;
+        uint32_t regLen = cols;
+        const char *regName = "row";
+
+        string base = outvars[outIdx].name.elems;
+
+        if(!flatten)
+        {
+          var.rows = 0;
+          var.columns = 0;
+          outIdx = 0;
+          out = &varmembers;
+          varmembers.resize(elems);
+          rowCopy = rows;
+          rows = 1;
+          registers = 1;
+        }
+        else
+        {
+          if(columnMajor)
+          {
+            registers = cols;
+            regLen = rows;
+            regName = "col";
+          }
+        }
+
+        size_t rowDataOffset = vec * sizeof(Vec4f);
+
+        for(size_t r = 0; r < registers * elems; r++)
+        {
+          if(isArray && registers > 1)
+            StringFormat::snprintf(buf, 63, "[%d].%s%d", r / registers, regName, r % registers);
+          else if(registers > 1)
+            StringFormat::snprintf(buf, 63, ".%s%d", regName, r);
+          else
+            StringFormat::snprintf(buf, 63, "[%d]", r);
+
+          (*out)[outIdx + r].name = base + buf;
+          (*out)[outIdx + r].rows = (uint32_t)rowCopy;
+          (*out)[outIdx + r].type = type;
+          (*out)[outIdx + r].isStruct = false;
+          (*out)[outIdx + r].columns = regLen;
+
+          size_t totalSize = 0;
+
+          if(flatten)
+          {
+            totalSize = elemByteSize * regLen;
+          }
+          else
+          {
+            // in a matrix, each major element before the last takes up a full
+            // vec4 at least
+            size_t vecSize = elemByteSize * 4;
+
+            if(columnMajor)
+              totalSize = vecSize * (cols - 1) + elemByteSize * rowCopy;
+            else
+              totalSize = vecSize * (rowCopy - 1) + elemByteSize * cols;
+          }
+
+          if((rowDataOffset % sizeof(Vec4f) != 0) &&
+             (rowDataOffset / sizeof(Vec4f) != (rowDataOffset + totalSize) / sizeof(Vec4f)))
+          {
+            rowDataOffset = AlignUp(rowDataOffset, sizeof(Vec4f));
+          }
+
+          if(rowDataOffset < data.size())
+          {
+            const byte *d = &data[rowDataOffset];
+
+            memcpy(&((*out)[outIdx + r].value.uv[0]), d,
+                   RDCMIN(data.size() - rowDataOffset, totalSize));
+
+            if(!flatten && columnMajor)
+            {
+              ShaderVariable tmp = (*out)[outIdx + r];
+
+              size_t transposeRows = rowCopy > 1 ? 4 : 1;
+
+              // transpose
+              for(size_t ri = 0; ri < transposeRows; ri++)
+                for(size_t ci = 0; ci < cols; ci++)
+                  (*out)[outIdx + r].value.uv[ri * cols + ci] = tmp.value.uv[ci * transposeRows + ri];
+            }
+          }
+
+          if(flatten)
+          {
+            rowDataOffset += sizeof(Vec4f);
+          }
+          else
+          {
+            if(columnMajor)
+              rowDataOffset += sizeof(Vec4f) * (cols - 1) + sizeof(float) * rowCopy;
+            else
+              rowDataOffset += sizeof(Vec4f) * (rowCopy - 1) + sizeof(float) * cols;
+          }
+        }
+
+        if(!flatten)
+        {
+          var.isStruct = false;
+          var.members = varmembers;
+        }
+      }
+    }
+  }
+}
+
+void D3D12DebugManager::FillCBufferVariables(const vector<DXBC::CBufferVariable> &invars,
+                                             vector<ShaderVariable> &outvars, bool flattenVec4s,
+                                             const vector<byte> &data)
+{
+  size_t zero = 0;
+
+  vector<ShaderVariable> v;
+  FillCBufferVariables("", zero, flattenVec4s, invars, v, data);
+
+  outvars.reserve(v.size());
+  for(size_t i = 0; i < v.size(); i++)
+    outvars.push_back(v[i]);
+}
+
+void D3D12DebugManager::GetBufferData(ResourceId buff, uint64_t offset, uint64_t length,
+                                      vector<byte> &retData)
+{
+  auto it = WrappedID3D12Resource::m_List.find(buff);
+
+  if(it == WrappedID3D12Resource::m_List.end())
+  {
+    RDCERR("Getting buffer data for unknown buffer %llu!", buff);
+    return;
+  }
+
+  WrappedID3D12Resource *buffer = it->second;
+
+  RDCASSERT(buffer);
+
+  GetBufferData(buffer, offset, length, retData);
+}
+
+void D3D12DebugManager::GetBufferData(ID3D12Resource *buffer, uint64_t offset, uint64_t length,
+                                      vector<byte> &ret)
+{
+  if(buffer == NULL)
+    return;
+
+  D3D12_RESOURCE_DESC desc = buffer->GetDesc();
+  D3D12_HEAP_PROPERTIES heapProps;
+  buffer->GetHeapProperties(&heapProps, NULL);
+
+  if(offset >= desc.Width)
+  {
+    // can't read past the end of the buffer, return empty
+    return;
+  }
+
+  if(length == 0)
+  {
+    length = desc.Width - offset;
+  }
+
+  if(length > 0 && offset + length > desc.Width)
+  {
+    RDCWARN("Attempting to read off the end of the buffer (%llu %llu). Will be clamped (%llu)",
+            offset, length, desc.Width);
+    length = RDCMIN(length, desc.Width - offset);
+  }
+
+#ifndef RDC64BIT
+  if(offset + length > 0xfffffff)
+  {
+    RDCERR("Trying to read back too much data on 32-bit build. Try running on 64-bit.");
+    return;
+  }
+#endif
+
+  uint64_t outOffs = 0;
+
+  ret.resize((size_t)length);
+
+  // directly CPU mappable (and possibly invalid to transition and copy from), so just memcpy
+  if(heapProps.Type == D3D12_HEAP_TYPE_UPLOAD || heapProps.Type == D3D12_HEAP_TYPE_READBACK)
+  {
+    D3D12_RANGE range = {(size_t)offset, size_t(offset + length)};
+
+    byte *data = NULL;
+    HRESULT hr = buffer->Map(0, &range, (void **)&data);
+
+    if(FAILED(hr))
+    {
+      RDCERR("Failed to map buffer directly for readback %08x", hr);
+      return;
+    }
+
+    memcpy(&ret[0], data + offset, (size_t)length);
+
+    range.Begin = range.End = 0;
+
+    buffer->Unmap(0, &range);
+
+    return;
+  }
+
+  ID3D12GraphicsCommandList *list = m_WrappedDevice->GetNewList();
+
+  D3D12_RESOURCE_BARRIER barrier = {};
+
+  barrier.Transition.pResource = buffer;
+  barrier.Transition.StateBefore = m_WrappedDevice->GetSubresourceStates(GetResID(buffer))[0];
+  barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+
+  list->ResourceBarrier(1, &barrier);
+
+  while(length > 0)
+  {
+    uint64_t chunkSize = RDCMIN(length, m_ReadbackSize);
+
+    list->CopyBufferRegion(m_ReadbackBuffer, 0, buffer, offset, chunkSize);
+
+    list->Close();
+
+    m_WrappedDevice->ExecuteLists();
+    m_WrappedDevice->FlushLists();
+
+    D3D12_RANGE range = {0, (size_t)chunkSize};
+
+    void *data = NULL;
+    HRESULT hr = m_ReadbackBuffer->Map(0, &range, &data);
+
+    if(FAILED(hr))
+    {
+      RDCERR("Failed to map bufferdata buffer %08x", hr);
+      return;
+    }
+    else
+    {
+      memcpy(&ret[(size_t)outOffs], data, (size_t)chunkSize);
+
+      range.End = 0;
+
+      m_ReadbackBuffer->Unmap(0, &range);
+    }
+
+    outOffs += chunkSize;
+    length -= chunkSize;
+
+    if(length > 0)
+      list = m_WrappedDevice->GetNewList();
+  }
+}
+
 void D3D12DebugManager::RenderCheckerboard(Vec3f light, Vec3f dark)
 {
   DebugVertexCBuffer vertexData;
@@ -1743,12 +2233,27 @@ bool D3D12DebugManager::RenderTextureInternal(D3D12_CPU_DESCRIPTOR_HANDLE rtv, T
 
   D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc;
   srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
-  srvDesc.Format = GetTypedFormat(resource->GetDesc().Format, cfg.typeHint);
+  srvDesc.Format = GetTypedFormat(resourceDesc.Format, cfg.typeHint);
   srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
   srvDesc.Texture2D.MipLevels = ~0U;
   srvDesc.Texture2D.MostDetailedMip = 0;
   srvDesc.Texture2D.PlaneSlice = 0;
   srvDesc.Texture2D.ResourceMinLODClamp = 0.0f;
+
+  // can't display depth textures directly yet
+  if(IsDepthFormat(srvDesc.Format) && !IsTypelessFormat(srvDesc.Format))
+    return true;
+
+  // or non-2D
+  if(resourceDesc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D)
+    return true;
+
+  if(resource->GetDesc().SampleDesc.Count > 1)
+  {
+    srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2DMS;
+    srv.ptr +=
+        7 * m_WrappedDevice->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+  }
 
   m_WrappedDevice->CreateShaderResourceView(resource, &srvDesc, srv);
 

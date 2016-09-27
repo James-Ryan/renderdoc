@@ -28,8 +28,11 @@
 #include "core/core.h"
 #include "replay/replay_driver.h"
 #include "d3d12_common.h"
+#include "d3d12_state.h"
 
 class WrappedID3D12Device;
+
+struct PortableHandle;
 
 class D3D12Replay : public IReplayDriver
 {
@@ -59,6 +62,7 @@ public:
 
   void SavePipelineState() { MakePipelineState(); }
   D3D11PipelineState GetD3D11PipelineState() { return D3D11PipelineState(); }
+  D3D12PipelineState GetD3D12PipelineState() { return m_PipelineState; }
   GLPipelineState GetGLPipelineState() { return GLPipelineState(); }
   VulkanPipelineState GetVulkanPipelineState() { return VulkanPipelineState(); }
   void FreeTargetResource(ResourceId id);
@@ -160,11 +164,18 @@ public:
   Callstack::StackResolver *GetCallstackResolver();
 
 private:
-  D3D11PipelineState MakePipelineState();
+  void MakePipelineState();
+
+  void FillRegisterSpaces(const D3D12RenderState::RootSignature &rootSig,
+                          rdctype::array<D3D12PipelineState::ShaderStage::RegisterSpace> &spaces,
+                          D3D12_SHADER_VISIBILITY visibility);
+  void FillResourceView(D3D12PipelineState::ResourceView &view, D3D12Descriptor *desc);
 
   bool m_Proxy;
 
   vector<ID3D12Resource *> m_ProxyResources;
+
+  D3D12PipelineState m_PipelineState;
 
   WrappedID3D12Device *m_pDevice;
 };

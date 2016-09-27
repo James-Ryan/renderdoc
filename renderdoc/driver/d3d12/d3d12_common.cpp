@@ -28,6 +28,310 @@
 #include "d3d12_manager.h"
 #include "d3d12_resources.h"
 
+static ShaderConstant MakeConstantBufferVariable(const DXBC::CBufferVariable &var, uint32_t &offset);
+
+static ShaderVariableType MakeShaderVariableType(DXBC::CBufferVariableType type, uint32_t &offset)
+{
+  ShaderVariableType ret;
+
+  switch(type.descriptor.type)
+  {
+    case DXBC::VARTYPE_INT: ret.descriptor.type = eVar_Int; break;
+    case DXBC::VARTYPE_BOOL:
+    case DXBC::VARTYPE_UINT: ret.descriptor.type = eVar_UInt; break;
+    case DXBC::VARTYPE_DOUBLE: ret.descriptor.type = eVar_Double; break;
+    case DXBC::VARTYPE_FLOAT:
+    default: ret.descriptor.type = eVar_Float; break;
+  }
+  ret.descriptor.rows = type.descriptor.rows;
+  ret.descriptor.cols = type.descriptor.cols;
+  ret.descriptor.elements = type.descriptor.elements;
+  ret.descriptor.name = type.descriptor.name;
+  ret.descriptor.rowMajorStorage = (type.descriptor.varClass == DXBC::CLASS_MATRIX_ROWS);
+
+  uint32_t baseElemSize = (ret.descriptor.type == eVar_Double) ? 8 : 4;
+  if(ret.descriptor.rowMajorStorage)
+  {
+    uint32_t primary = ret.descriptor.rows;
+    if(primary == 3)
+      primary = 4;
+    ret.descriptor.arrayStride = baseElemSize * primary * ret.descriptor.cols;
+  }
+  else
+  {
+    uint32_t primary = ret.descriptor.cols;
+    if(primary == 3)
+      primary = 4;
+    ret.descriptor.arrayStride = baseElemSize * primary * ret.descriptor.rows;
+  }
+
+  uint32_t o = offset;
+
+  create_array_uninit(ret.members, type.members.size());
+  for(size_t i = 0; i < type.members.size(); i++)
+  {
+    offset = o;
+    ret.members[i] = MakeConstantBufferVariable(type.members[i], offset);
+  }
+
+  if(ret.members.count > 0)
+  {
+    ret.descriptor.rows = 0;
+    ret.descriptor.cols = 0;
+    ret.descriptor.elements = 0;
+  }
+
+  return ret;
+}
+
+static ShaderConstant MakeConstantBufferVariable(const DXBC::CBufferVariable &var, uint32_t &offset)
+{
+  ShaderConstant ret;
+
+  ret.name = var.name;
+  ret.reg.vec = offset + var.descriptor.offset / 16;
+  ret.reg.comp = (var.descriptor.offset - (var.descriptor.offset & ~0xf)) / 4;
+  ret.defaultValue = 0;
+
+  offset = ret.reg.vec;
+
+  ret.type = MakeShaderVariableType(var.type, offset);
+
+  offset = ret.reg.vec + RDCMAX(1U, var.type.descriptor.bytesize / 16);
+
+  return ret;
+}
+
+void MakeShaderReflection(DXBC::DXBCFile *dxbc, ShaderReflection *refl,
+                          ShaderBindpointMapping *mapping)
+{
+  if(dxbc == NULL || !RenderDoc::Inst().IsReplayApp())
+    return;
+
+  if(dxbc->m_DebugInfo)
+  {
+    refl->DebugInfo.entryFunc = dxbc->m_DebugInfo->GetEntryFunction();
+    refl->DebugInfo.compileFlags = dxbc->m_DebugInfo->GetShaderCompileFlags();
+
+    refl->DebugInfo.entryFile = -1;
+
+    create_array_uninit(refl->DebugInfo.files, dxbc->m_DebugInfo->Files.size());
+    for(size_t i = 0; i < dxbc->m_DebugInfo->Files.size(); i++)
+    {
+      refl->DebugInfo.files[i].first = dxbc->m_DebugInfo->Files[i].first;
+      refl->DebugInfo.files[i].second = dxbc->m_DebugInfo->Files[i].second;
+
+      if(refl->DebugInfo.entryFile == -1 &&
+         strstr(refl->DebugInfo.files[i].second.elems, refl->DebugInfo.entryFunc.elems))
+      {
+        refl->DebugInfo.entryFile = (int32_t)i;
+      }
+    }
+  }
+
+  refl->Disassembly = dxbc->GetDisassembly();
+
+  if(dxbc->m_ShaderBlob.empty())
+    create_array_uninit(refl->RawBytes, 0);
+  else
+    create_array_init(refl->RawBytes, dxbc->m_ShaderBlob.size(), &dxbc->m_ShaderBlob[0]);
+
+  refl->DispatchThreadsDimension[0] = dxbc->DispatchThreadsDimension[0];
+  refl->DispatchThreadsDimension[1] = dxbc->DispatchThreadsDimension[1];
+  refl->DispatchThreadsDimension[2] = dxbc->DispatchThreadsDimension[2];
+
+  refl->InputSig = dxbc->m_InputSig;
+  refl->OutputSig = dxbc->m_OutputSig;
+
+  create_array_uninit(mapping->InputAttributes, D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT);
+  for(int s = 0; s < D3D12_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT; s++)
+    mapping->InputAttributes[s] = s;
+
+  int numCbuffers = 0;
+
+  // skip 'empty' cbuffers added for the benefit of D3D11
+  for(size_t i = 0; i < dxbc->m_CBuffers.size(); i++)
+  {
+    if(dxbc->m_CBuffers[i].descriptor.type == DXBC::CBuffer::Descriptor::TYPE_CBUFFER)
+      numCbuffers++;
+  }
+
+  create_array_uninit(mapping->ConstantBlocks, numCbuffers);
+  create_array_uninit(refl->ConstantBlocks, numCbuffers);
+  for(size_t i = 0, c = 0; i < dxbc->m_CBuffers.size(); i++)
+  {
+    ConstantBlock &cb = refl->ConstantBlocks[c];
+
+    if(dxbc->m_CBuffers[i].descriptor.type != DXBC::CBuffer::Descriptor::TYPE_CBUFFER)
+      continue;
+
+    cb.name = dxbc->m_CBuffers[i].name;
+    cb.bufferBacked = true;
+    cb.byteSize = dxbc->m_CBuffers[i].descriptor.byteSize;
+    cb.bindPoint = (uint32_t)c;
+
+    BindpointMap map = {};
+    map.arraySize = 1;
+    map.bind = (int32_t)i;
+    map.used = true;
+
+    mapping->ConstantBlocks[c] = map;
+
+    create_array_uninit(cb.variables, dxbc->m_CBuffers[i].variables.size());
+    for(size_t v = 0; v < dxbc->m_CBuffers[i].variables.size(); v++)
+    {
+      uint32_t vecOffset = 0;
+      cb.variables[v] = MakeConstantBufferVariable(dxbc->m_CBuffers[i].variables[v], vecOffset);
+    }
+  }
+
+  int numRWResources = 0;
+  int numROResources = 0;
+
+  for(size_t i = 0; i < dxbc->m_Resources.size(); i++)
+  {
+    const auto &r = dxbc->m_Resources[i];
+
+    if(r.type != DXBC::ShaderInputBind::TYPE_CBUFFER)
+    {
+      bool IsReadWrite = (r.type == DXBC::ShaderInputBind::TYPE_UAV_RWTYPED ||
+                          r.type == DXBC::ShaderInputBind::TYPE_UAV_RWSTRUCTURED ||
+                          r.type == DXBC::ShaderInputBind::TYPE_UAV_RWBYTEADDRESS ||
+                          r.type == DXBC::ShaderInputBind::TYPE_UAV_APPEND_STRUCTURED ||
+                          r.type == DXBC::ShaderInputBind::TYPE_UAV_CONSUME_STRUCTURED ||
+                          r.type == DXBC::ShaderInputBind::TYPE_UAV_RWSTRUCTURED_WITH_COUNTER);
+
+      if(IsReadWrite)
+        numRWResources++;
+      else
+        numROResources++;
+    }
+  }
+
+  create_array_uninit(mapping->ReadWriteResources, numRWResources);
+  create_array_uninit(refl->ReadWriteResources, numRWResources);
+
+  create_array_uninit(mapping->ReadOnlyResources, numROResources);
+  create_array_uninit(refl->ReadOnlyResources, numROResources);
+
+  int32_t rwidx = 0, roidx = 0;
+  for(size_t i = 0; i < dxbc->m_Resources.size(); i++)
+  {
+    const auto &r = dxbc->m_Resources[i];
+
+    if(r.type == DXBC::ShaderInputBind::TYPE_CBUFFER)
+      continue;
+
+    ShaderResource res;
+    res.name = r.name;
+
+    res.IsSampler = (r.type == DXBC::ShaderInputBind::TYPE_SAMPLER);
+    res.IsTexture = (r.type == DXBC::ShaderInputBind::TYPE_TEXTURE &&
+                     r.dimension != DXBC::ShaderInputBind::DIM_UNKNOWN &&
+                     r.dimension != DXBC::ShaderInputBind::DIM_BUFFER &&
+                     r.dimension != DXBC::ShaderInputBind::DIM_BUFFEREX);
+    res.IsSRV = (r.type == DXBC::ShaderInputBind::TYPE_TBUFFER ||
+                 r.type == DXBC::ShaderInputBind::TYPE_TEXTURE ||
+                 r.type == DXBC::ShaderInputBind::TYPE_STRUCTURED ||
+                 r.type == DXBC::ShaderInputBind::TYPE_BYTEADDRESS);
+    bool IsReadWrite = (r.type == DXBC::ShaderInputBind::TYPE_UAV_RWTYPED ||
+                        r.type == DXBC::ShaderInputBind::TYPE_UAV_RWSTRUCTURED ||
+                        r.type == DXBC::ShaderInputBind::TYPE_UAV_RWBYTEADDRESS ||
+                        r.type == DXBC::ShaderInputBind::TYPE_UAV_APPEND_STRUCTURED ||
+                        r.type == DXBC::ShaderInputBind::TYPE_UAV_CONSUME_STRUCTURED ||
+                        r.type == DXBC::ShaderInputBind::TYPE_UAV_RWSTRUCTURED_WITH_COUNTER);
+
+    switch(r.dimension)
+    {
+      default:
+      case DXBC::ShaderInputBind::DIM_UNKNOWN: res.resType = eResType_None; break;
+      case DXBC::ShaderInputBind::DIM_BUFFER:
+      case DXBC::ShaderInputBind::DIM_BUFFEREX: res.resType = eResType_Buffer; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURE1D: res.resType = eResType_Texture1D; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURE1DARRAY: res.resType = eResType_Texture1DArray; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURE2D: res.resType = eResType_Texture2D; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURE2DARRAY: res.resType = eResType_Texture2DArray; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURE2DMS: res.resType = eResType_Texture2DMS; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURE2DMSARRAY:
+        res.resType = eResType_Texture2DMSArray;
+        break;
+      case DXBC::ShaderInputBind::DIM_TEXTURE3D: res.resType = eResType_Texture3D; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURECUBE: res.resType = eResType_TextureCube; break;
+      case DXBC::ShaderInputBind::DIM_TEXTURECUBEARRAY:
+        res.resType = eResType_TextureCubeArray;
+        break;
+    }
+
+    if(r.retType != DXBC::ShaderInputBind::RETTYPE_UNKNOWN &&
+       r.retType != DXBC::ShaderInputBind::RETTYPE_MIXED &&
+       r.retType != DXBC::ShaderInputBind::RETTYPE_CONTINUED)
+    {
+      res.variableType.descriptor.rows = 1;
+      res.variableType.descriptor.cols = r.numSamples;
+      res.variableType.descriptor.elements = 1;
+
+      string name;
+
+      switch(r.retType)
+      {
+        case DXBC::ShaderInputBind::RETTYPE_UNORM: name = "unorm float"; break;
+        case DXBC::ShaderInputBind::RETTYPE_SNORM: name = "snorm float"; break;
+        case DXBC::ShaderInputBind::RETTYPE_SINT: name = "int"; break;
+        case DXBC::ShaderInputBind::RETTYPE_UINT: name = "uint"; break;
+        case DXBC::ShaderInputBind::RETTYPE_FLOAT: name = "float"; break;
+        case DXBC::ShaderInputBind::RETTYPE_DOUBLE: name = "double"; break;
+        default: name = "unknown"; break;
+      }
+
+      name += ToStr::Get(r.numSamples);
+
+      res.variableType.descriptor.name = name;
+    }
+    else
+    {
+      if(dxbc->m_ResourceBinds.find(r.name) != dxbc->m_ResourceBinds.end())
+      {
+        uint32_t vecOffset = 0;
+        res.variableType = MakeShaderVariableType(dxbc->m_ResourceBinds[r.name], vecOffset);
+      }
+      else
+      {
+        res.variableType.descriptor.rows = 0;
+        res.variableType.descriptor.cols = 0;
+        res.variableType.descriptor.elements = 0;
+        res.variableType.descriptor.name = "";
+      }
+    }
+
+    res.bindPoint = IsReadWrite ? rwidx : roidx;
+
+    BindpointMap map = {};
+    map.arraySize = 1;
+    map.bind = r.bindPoint;
+    map.used = true;
+
+    if(IsReadWrite)
+    {
+      mapping->ReadWriteResources[rwidx] = map;
+      refl->ReadWriteResources[rwidx++] = res;
+    }
+    else
+    {
+      mapping->ReadOnlyResources[roidx] = map;
+      refl->ReadOnlyResources[roidx++] = res;
+    }
+  }
+
+  uint32_t numInterfaces = 0;
+  for(size_t i = 0; i < dxbc->m_Interfaces.variables.size(); i++)
+    numInterfaces = RDCMAX(dxbc->m_Interfaces.variables[i].descriptor.offset + 1, numInterfaces);
+
+  create_array(refl->Interfaces, numInterfaces);
+  for(size_t i = 0; i < dxbc->m_Interfaces.variables.size(); i++)
+    refl->Interfaces[dxbc->m_Interfaces.variables[i].descriptor.offset] =
+        dxbc->m_Interfaces.variables[i].name;
+}
+
 enum D3D12ResourceBarrierSubresource
 {
   D3D12AllSubresources = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES
@@ -120,6 +424,21 @@ UINT GetNumSubresources(const D3D12_RESOURCE_DESC *desc)
   }
 
   return 1;
+}
+
+ShaderStageBits ConvertVisibility(D3D12_SHADER_VISIBILITY ShaderVisibility)
+{
+  switch(ShaderVisibility)
+  {
+    case D3D12_SHADER_VISIBILITY_ALL: return eStageBits_All;
+    case D3D12_SHADER_VISIBILITY_VERTEX: return eStageBits_Vertex;
+    case D3D12_SHADER_VISIBILITY_HULL: return eStageBits_Hull;
+    case D3D12_SHADER_VISIBILITY_DOMAIN: return eStageBits_Domain;
+    case D3D12_SHADER_VISIBILITY_GEOMETRY: return eStageBits_Geometry;
+    case D3D12_SHADER_VISIBILITY_PIXEL: return eStageBits_Pixel;
+  }
+
+  return eStageBits_Vertex;
 }
 
 string ToStrHelper<false, D3D12ComponentMapping>::Get(const D3D12ComponentMapping &el)
@@ -285,13 +604,6 @@ void Serialiser::Serialise(const char *name, D3D12_SHADER_BYTECODE &el)
 
   if(dataSize > 0)
     SerialiseBuffer("pShaderBytecode", (byte *&)el.pShaderBytecode, sz);
-}
-
-template <>
-void Serialiser::Deserialise(const D3D12_SHADER_BYTECODE *const el) const
-{
-  if(m_Mode == READING)
-    delete[](byte *)(el->pShaderBytecode);
 }
 
 template <>
@@ -570,6 +882,19 @@ void Serialiser::Serialise(const char *name, D3D12_GRAPHICS_PIPELINE_STATE_DESC 
 }
 
 template <>
+void Serialiser::Deserialise(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *const el) const
+{
+  if(m_Mode == READING)
+  {
+    delete[](byte *)(el->VS.pShaderBytecode);
+    delete[](byte *)(el->PS.pShaderBytecode);
+    delete[](byte *)(el->DS.pShaderBytecode);
+    delete[](byte *)(el->HS.pShaderBytecode);
+    delete[](byte *)(el->GS.pShaderBytecode);
+  }
+}
+
+template <>
 void Serialiser::Serialise(const char *name, D3D12_COMPUTE_PIPELINE_STATE_DESC &el)
 {
   ScopedContext scope(this, name, "D3D12_COMPUTE_PIPELINE_STATE_DESC", 0, true);
@@ -584,6 +909,13 @@ void Serialiser::Serialise(const char *name, D3D12_COMPUTE_PIPELINE_STATE_DESC &
     el.CachedPSO.CachedBlobSizeInBytes = 0;
     el.CachedPSO.pCachedBlob = NULL;
   }
+}
+
+template <>
+void Serialiser::Deserialise(const D3D12_COMPUTE_PIPELINE_STATE_DESC *const el) const
+{
+  if(m_Mode == READING)
+    delete[](byte *)(el->CS.pShaderBytecode);
 }
 
 template <>
@@ -1033,6 +1365,13 @@ void Serialiser::Serialise(const char *name, D3D12_DISCARD_REGION &el)
 }
 
 template <>
+void Serialiser::Deserialise(const D3D12_DISCARD_REGION *const el) const
+{
+  if(m_Mode == READING)
+    delete[] el->pRects;
+}
+
+template <>
 void Serialiser::Serialise(const char *name, D3D12_SAMPLER_DESC &el)
 {
   ScopedContext scope(this, name, "D3D12_SAMPLER_DESC", 0, true);
@@ -1335,6 +1674,10 @@ string ToStrHelper<false, D3D12_TEXTURE_ADDRESS_MODE>::Get(const D3D12_TEXTURE_A
     default: break;
   }
 
+  // possible for unused fields via 0-initialisation
+  if((int)el == 0)
+    return "--";
+
   return StringFormat::Fmt("D3D12_TEXTURE_ADDRESS_MODE<%d>", el);
 }
 
@@ -1342,25 +1685,29 @@ string ToStrHelper<false, D3D12_BLEND>::Get(const D3D12_BLEND &el)
 {
   switch(el)
   {
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_ZERO)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_ONE)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_SRC_COLOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_INV_SRC_COLOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_SRC_ALPHA)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_INV_SRC_ALPHA)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_DEST_ALPHA)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_INV_DEST_ALPHA)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_DEST_COLOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_INV_DEST_COLOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_SRC_ALPHA_SAT)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_BLEND_FACTOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_INV_BLEND_FACTOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_SRC1_COLOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_INV_SRC1_COLOR)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_SRC1_ALPHA)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_INV_SRC1_ALPHA)
+    case D3D12_BLEND_ZERO: return "ZERO";
+    case D3D12_BLEND_ONE: return "ONE";
+    case D3D12_BLEND_SRC_COLOR: return "SRC_COLOR";
+    case D3D12_BLEND_INV_SRC_COLOR: return "INV_SRC_COLOR";
+    case D3D12_BLEND_SRC_ALPHA: return "SRC_ALPHA";
+    case D3D12_BLEND_INV_SRC_ALPHA: return "INV_SRC_ALPHA";
+    case D3D12_BLEND_DEST_ALPHA: return "DEST_ALPHA";
+    case D3D12_BLEND_INV_DEST_ALPHA: return "INV_DEST_ALPHA";
+    case D3D12_BLEND_DEST_COLOR: return "DEST_COLOR";
+    case D3D12_BLEND_INV_DEST_COLOR: return "INV_DEST_COLOR";
+    case D3D12_BLEND_SRC_ALPHA_SAT: return "SRC_ALPHA_SAT";
+    case D3D12_BLEND_BLEND_FACTOR: return "BLEND_FACTOR";
+    case D3D12_BLEND_INV_BLEND_FACTOR: return "INV_BLEND_FACTOR";
+    case D3D12_BLEND_SRC1_COLOR: return "SRC1_COLOR";
+    case D3D12_BLEND_INV_SRC1_COLOR: return "INV_SRC1_COLOR";
+    case D3D12_BLEND_SRC1_ALPHA: return "SRC1_ALPHA";
+    case D3D12_BLEND_INV_SRC1_ALPHA: return "INV_SRC1_ALPHA";
     default: break;
   }
+
+  // possible for unused fields via 0-initialisation
+  if((int)el == 0)
+    return "--";
 
   return StringFormat::Fmt("D3D12_BLEND<%d>", el);
 }
@@ -1369,13 +1716,17 @@ string ToStrHelper<false, D3D12_BLEND_OP>::Get(const D3D12_BLEND_OP &el)
 {
   switch(el)
   {
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_OP_ADD)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_OP_SUBTRACT)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_OP_REV_SUBTRACT)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_OP_MIN)
-    TOSTR_CASE_STRINGIZE(D3D12_BLEND_OP_MAX)
+    case D3D12_BLEND_OP_ADD: return "ADD";
+    case D3D12_BLEND_OP_SUBTRACT: return "SUBTRACT";
+    case D3D12_BLEND_OP_REV_SUBTRACT: return "REV_SUBTRACT";
+    case D3D12_BLEND_OP_MIN: return "MIN";
+    case D3D12_BLEND_OP_MAX: return "MAX";
     default: break;
   }
+
+  // possible for unused fields via 0-initialisation
+  if((int)el == 0)
+    return "--";
 
   return StringFormat::Fmt("D3D12_BLEND_OP<%d>", el);
 }
@@ -1384,22 +1735,22 @@ string ToStrHelper<false, D3D12_LOGIC_OP>::Get(const D3D12_LOGIC_OP &el)
 {
   switch(el)
   {
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_CLEAR)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_SET)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_COPY)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_COPY_INVERTED)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_NOOP)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_INVERT)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_AND)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_NAND)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_OR)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_NOR)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_XOR)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_EQUIV)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_AND_REVERSE)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_AND_INVERTED)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_OR_REVERSE)
-    TOSTR_CASE_STRINGIZE(D3D12_LOGIC_OP_OR_INVERTED)
+    case D3D12_LOGIC_OP_CLEAR: return "CLEAR";
+    case D3D12_LOGIC_OP_SET: return "SET";
+    case D3D12_LOGIC_OP_COPY: return "COPY";
+    case D3D12_LOGIC_OP_COPY_INVERTED: return "COPY_INVERTED";
+    case D3D12_LOGIC_OP_NOOP: return "NOOP";
+    case D3D12_LOGIC_OP_INVERT: return "INVERT";
+    case D3D12_LOGIC_OP_AND: return "AND";
+    case D3D12_LOGIC_OP_NAND: return "NAND";
+    case D3D12_LOGIC_OP_OR: return "OR";
+    case D3D12_LOGIC_OP_NOR: return "NOR";
+    case D3D12_LOGIC_OP_XOR: return "XOR";
+    case D3D12_LOGIC_OP_EQUIV: return "EQUIV";
+    case D3D12_LOGIC_OP_AND_REVERSE: return "AND_REVERSE";
+    case D3D12_LOGIC_OP_AND_INVERTED: return "AND_INVERTED";
+    case D3D12_LOGIC_OP_OR_REVERSE: return "OR_REVERSE";
+    case D3D12_LOGIC_OP_OR_INVERTED: return "OR_INVERTED";
     default: break;
   }
 
@@ -1410,10 +1761,14 @@ string ToStrHelper<false, D3D12_FILL_MODE>::Get(const D3D12_FILL_MODE &el)
 {
   switch(el)
   {
-    TOSTR_CASE_STRINGIZE(D3D12_FILL_MODE_WIREFRAME)
-    TOSTR_CASE_STRINGIZE(D3D12_FILL_MODE_SOLID)
+    case D3D12_FILL_MODE_WIREFRAME: return "WIREFRAME";
+    case D3D12_FILL_MODE_SOLID: return "SOLID";
     default: break;
   }
+
+  // possible for unused fields via 0-initialisation
+  if((int)el == 0)
+    return "--";
 
   return StringFormat::Fmt("D3D12_FILL_MODE<%d>", el);
 }
@@ -1422,11 +1777,15 @@ string ToStrHelper<false, D3D12_CULL_MODE>::Get(const D3D12_CULL_MODE &el)
 {
   switch(el)
   {
-    TOSTR_CASE_STRINGIZE(D3D12_CULL_MODE_NONE)
-    TOSTR_CASE_STRINGIZE(D3D12_CULL_MODE_FRONT)
-    TOSTR_CASE_STRINGIZE(D3D12_CULL_MODE_BACK)
+    case D3D12_CULL_MODE_NONE: return "NONE";
+    case D3D12_CULL_MODE_FRONT: return "FRONT";
+    case D3D12_CULL_MODE_BACK: return "BACK";
     default: break;
   }
+
+  // possible for unused fields via 0-initialisation
+  if((int)el == 0)
+    return "--";
 
   return StringFormat::Fmt("D3D12_CULL_MODE<%d>", el);
 }
@@ -1448,16 +1807,20 @@ string ToStrHelper<false, D3D12_COMPARISON_FUNC>::Get(const D3D12_COMPARISON_FUN
 {
   switch(el)
   {
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_NEVER)
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_LESS)
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_EQUAL)
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_LESS_EQUAL)
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_GREATER)
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_NOT_EQUAL)
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_GREATER_EQUAL)
-    TOSTR_CASE_STRINGIZE(D3D12_COMPARISON_FUNC_ALWAYS)
+    case D3D12_COMPARISON_FUNC_NEVER: return "NEVER";
+    case D3D12_COMPARISON_FUNC_LESS: return "LESS";
+    case D3D12_COMPARISON_FUNC_EQUAL: return "EQUAL";
+    case D3D12_COMPARISON_FUNC_LESS_EQUAL: return "LESS_EQUAL";
+    case D3D12_COMPARISON_FUNC_GREATER: return "GREATER";
+    case D3D12_COMPARISON_FUNC_NOT_EQUAL: return "NOT_EQUAL";
+    case D3D12_COMPARISON_FUNC_GREATER_EQUAL: return "GREATER_EQUAL";
+    case D3D12_COMPARISON_FUNC_ALWAYS: return "ALWAYS";
     default: break;
   }
+
+  // possible for unused fields via 0-initialisation
+  if((int)el == 0)
+    return "--";
 
   return StringFormat::Fmt("D3D12_COMPARISON_FUNC<%d>", el);
 }
@@ -1478,16 +1841,20 @@ string ToStrHelper<false, D3D12_STENCIL_OP>::Get(const D3D12_STENCIL_OP &el)
 {
   switch(el)
   {
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_KEEP)
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_ZERO)
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_REPLACE)
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_INCR_SAT)
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_DECR_SAT)
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_INVERT)
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_INCR)
-    TOSTR_CASE_STRINGIZE(D3D12_STENCIL_OP_DECR)
+    case D3D12_STENCIL_OP_KEEP: return "KEEP";
+    case D3D12_STENCIL_OP_ZERO: return "ZERO";
+    case D3D12_STENCIL_OP_REPLACE: return "REPLACE";
+    case D3D12_STENCIL_OP_INCR_SAT: return "INCR_SAT";
+    case D3D12_STENCIL_OP_DECR_SAT: return "DECR_SAT";
+    case D3D12_STENCIL_OP_INVERT: return "INVERT";
+    case D3D12_STENCIL_OP_INCR: return "INCR";
+    case D3D12_STENCIL_OP_DECR: return "DECR";
     default: break;
   }
+
+  // possible for unused fields via 0-initialisation
+  if((int)el == 0)
+    return "--";
 
   return StringFormat::Fmt("D3D12_STENCIL_OP<%d>", el);
 }
