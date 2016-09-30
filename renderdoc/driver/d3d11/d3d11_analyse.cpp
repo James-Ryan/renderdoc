@@ -37,6 +37,8 @@
 #include "d3d11_debug.h"
 #include "d3d11_manager.h"
 
+#include "data/hlsl/debugcbuffers.h"
+
 // over this number of cycles and things get problematic
 #define SHADER_DEBUG_WARN_THRESHOLD 100000
 
@@ -1781,6 +1783,9 @@ ShaderDebugTrace D3D11DebugManager::DebugPixel(uint32_t eventID, uint32_t x, uin
     return empty;
   }
 
+  // replay back to where we were, so we don't pick up modifications by this event in UAVs
+  m_WrappedDevice->ReplayLog(0, eventID, eReplay_WithoutDraw);
+
   ShaderDebugTrace traces[4];
 
   GlobalState global;
@@ -2235,26 +2240,35 @@ uint32_t D3D11DebugManager::PickVertex(uint32_t eventID, const MeshDisplay &cfg,
 
   struct MeshPickData
   {
+    Vec3f RayPos;
+    uint32_t PickIdx;
+
+    Vec3f RayDir;
+    uint32_t PickNumVerts;
+
     Vec2f PickCoords;
     Vec2f PickViewport;
 
+    uint32_t MeshMode;
+    uint32_t PickUnproject;
+    Vec2f Padding;
+
     Matrix4f PickMVP;
 
-    uint32_t PickIdx;
-    uint32_t PickNumVerts;
-    uint32_t PickPadding[2];
   } cbuf;
 
   cbuf.PickCoords = Vec2f((float)x, (float)y);
   cbuf.PickViewport = Vec2f((float)GetWidth(), (float)GetHeight());
   cbuf.PickIdx = cfg.position.idxByteWidth ? 1 : 0;
   cbuf.PickNumVerts = cfg.position.numVerts;
+  cbuf.PickUnproject = cfg.position.unproject ? 1 : 0;
 
   Matrix4f projMat =
       Matrix4f::Perspective(90.0f, 0.1f, 100000.0f, float(GetWidth()) / float(GetHeight()));
 
   Matrix4f camMat = cfg.cam ? cfg.cam->GetMatrix() : Matrix4f::Identity();
-  cbuf.PickMVP = projMat.Mul(camMat);
+
+  Matrix4f pickMVP = projMat.Mul(camMat);
 
   ResourceFormat resFmt;
   resFmt.compByteWidth = cfg.position.compByteWidth;
@@ -2267,6 +2281,7 @@ uint32_t D3D11DebugManager::PickVertex(uint32_t eventID, const MeshDisplay &cfg,
     resFmt.specialFormat = cfg.position.specialFormat;
   }
 
+  Matrix4f pickMVPProj;
   if(cfg.position.unproject)
   {
     // the derivation of the projection matrix might not be right (hell, it could be an
@@ -2277,7 +2292,92 @@ uint32_t D3D11DebugManager::PickVertex(uint32_t eventID, const MeshDisplay &cfg,
     if(cfg.ortho)
       guessProj = Matrix4f::Orthographic(cfg.position.nearPlane, cfg.position.farPlane);
 
-    cbuf.PickMVP = projMat.Mul(camMat.Mul(guessProj.Inverse()));
+    pickMVPProj = projMat.Mul(camMat.Mul(guessProj.Inverse()));
+  }
+
+  Vec3f rayPos;
+  Vec3f rayDir;
+  // convert mouse pos to world space ray
+  {
+    Matrix4f inversePickMVP = pickMVP.Inverse();
+
+    float pickX = ((float)x) / ((float)GetWidth());
+    float pickXCanonical = RDCLERP(-1.0f, 1.0f, pickX);
+
+    float pickY = ((float)y) / ((float)GetHeight());
+    // flip the Y axis
+    float pickYCanonical = RDCLERP(1.0f, -1.0f, pickY);
+
+    Vec3f cameraToWorldNearPosition =
+        inversePickMVP.Transform(Vec3f(pickXCanonical, pickYCanonical, -1), 1);
+
+    Vec3f cameraToWorldFarPosition =
+        inversePickMVP.Transform(Vec3f(pickXCanonical, pickYCanonical, 1), 1);
+
+    Vec3f testDir = (cameraToWorldFarPosition - cameraToWorldNearPosition);
+    testDir.Normalise();
+
+    /* Calculate the ray direction first in the regular way (above), so we can use the
+    the output for testing if the ray we are picking is negative or not. This is similar
+    to checking against the forward direction of the camera, but more robust
+    */
+    if(cfg.position.unproject)
+    {
+      Matrix4f inversePickMVPGuess = pickMVPProj.Inverse();
+
+      Vec3f nearPosProj = inversePickMVPGuess.Transform(Vec3f(pickXCanonical, pickYCanonical, -1), 1);
+
+      Vec3f farPosProj = inversePickMVPGuess.Transform(Vec3f(pickXCanonical, pickYCanonical, 1), 1);
+
+      rayDir = (farPosProj - nearPosProj);
+      rayDir.Normalise();
+
+      if(testDir.z < 0)
+      {
+        rayDir = -rayDir;
+      }
+      rayPos = nearPosProj;
+    }
+    else
+    {
+      rayDir = testDir;
+      rayPos = cameraToWorldNearPosition;
+    }
+  }
+
+  cbuf.RayPos = rayPos;
+  cbuf.RayDir = rayDir;
+
+  cbuf.PickMVP = cfg.position.unproject ? pickMVPProj : pickMVP;
+
+  bool isTriangleMesh = true;
+  switch(cfg.position.topo)
+  {
+    case eTopology_TriangleList:
+    {
+      cbuf.MeshMode = MESH_TRIANGLE_LIST;
+      break;
+    };
+    case eTopology_TriangleStrip:
+    {
+      cbuf.MeshMode = MESH_TRIANGLE_STRIP;
+      break;
+    };
+    case eTopology_TriangleList_Adj:
+    {
+      cbuf.MeshMode = MESH_TRIANGLE_LIST_ADJ;
+      break;
+    };
+    case eTopology_TriangleStrip_Adj:
+    {
+      cbuf.MeshMode = MESH_TRIANGLE_STRIP_ADJ;
+      break;
+    };
+    default:    // points, lines, patchlists, unknown
+    {
+      cbuf.MeshMode = MESH_OTHER;
+      isTriangleMesh = false;
+    };
   }
 
   ID3D11Buffer *vb = NULL, *ib = NULL;
@@ -2445,38 +2545,70 @@ uint32_t D3D11DebugManager::PickVertex(uint32_t eventID, const MeshDisplay &cfg,
 
   if(numResults > 0)
   {
-    GetBufferData(m_DebugRender.PickResultBuf, 0, 0, results, false);
-
-    struct PickResult
+    if(isTriangleMesh)
     {
-      uint32_t vertid;
-      uint32_t idx;
-      float len;
-      float depth;
-    };
+      struct PickResult
+      {
+        uint32_t vertid;
+        Vec3f intersectionPoint;
+      };
 
-    PickResult *pickResults = (PickResult *)&results[0];
+      GetBufferData(m_DebugRender.PickResultBuf, 0, 0, results, false);
 
-    PickResult *closest = pickResults;
+      PickResult *pickResults = (PickResult *)&results[0];
 
-    // min with size of results buffer to protect against overflows
-    for(uint32_t i = 1; i < RDCMIN(DebugRenderData::maxMeshPicks, numResults); i++)
-    {
-      // We need to keep the picking order consistent in the face
-      // of random buffer appends, when multiple vertices have the
-      // identical position (e.g. if UVs or normals are different).
-      //
-      // We could do something to try and disambiguate, but it's
-      // never going to be intuitive, it's just going to flicker
-      // confusingly.
-      if(pickResults[i].len < closest->len ||
-         (pickResults[i].len == closest->len && pickResults[i].depth < closest->depth) ||
-         (pickResults[i].len == closest->len && pickResults[i].depth == closest->depth &&
-          pickResults[i].vertid < closest->vertid))
-        closest = pickResults + i;
+      PickResult *closest = pickResults;
+
+      // distance from raycast hit to nearest worldspace position of the mouse
+      float closestPickDistance = (closest->intersectionPoint - rayPos).Length();
+
+      // min with size of results buffer to protect against overflows
+      for(uint32_t i = 1; i < RDCMIN((uint32_t)DebugRenderData::maxMeshPicks, numResults); i++)
+      {
+        float pickDistance = (pickResults[i].intersectionPoint - rayPos).Length();
+        if(pickDistance < closestPickDistance)
+        {
+          closest = pickResults + i;
+        }
+      }
+
+      return closest->vertid;
     }
+    else
+    {
+      struct PickResult
+      {
+        uint32_t vertid;
+        uint32_t idx;
+        float len;
+        float depth;
+      };
 
-    return closest->vertid;
+      GetBufferData(m_DebugRender.PickResultBuf, 0, 0, results, false);
+
+      PickResult *pickResults = (PickResult *)&results[0];
+
+      PickResult *closest = pickResults;
+
+      // min with size of results buffer to protect against overflows
+      for(uint32_t i = 1; i < RDCMIN((uint32_t)DebugRenderData::maxMeshPicks, numResults); i++)
+      {
+        // We need to keep the picking order consistent in the face
+        // of random buffer appends, when multiple vertices have the
+        // identical position (e.g. if UVs or normals are different).
+        //
+        // We could do something to try and disambiguate, but it's
+        // never going to be intuitive, it's just going to flicker
+        // confusingly.
+        if(pickResults[i].len < closest->len ||
+           (pickResults[i].len == closest->len && pickResults[i].depth < closest->depth) ||
+           (pickResults[i].len == closest->len && pickResults[i].depth == closest->depth &&
+            pickResults[i].vertid < closest->vertid))
+          closest = pickResults + i;
+      }
+
+      return closest->vertid;
+    }
   }
 
   return ~0U;
@@ -2574,10 +2706,8 @@ void D3D11DebugManager::PickPixel(ResourceId texture, uint32_t x, uint32_t y, ui
   m_pImmediateContext->Unmap(m_DebugRender.PickPixelStageTex, 0);
 }
 
-byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32_t mip,
-                                        bool forDiskSave, FormatComponentType typeHint,
-                                        bool resolve, bool forceRGBA8unorm, float blackPoint,
-                                        float whitePoint, size_t &dataSize)
+byte *D3D11DebugManager::GetTextureData(ResourceId tex, uint32_t arrayIdx, uint32_t mip,
+                                        const GetTextureDataParams &params, size_t &dataSize)
 {
   ID3D11Resource *dummyTex = NULL;
 
@@ -2587,10 +2717,10 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
   dataSize = 0;
   size_t bytesize = 0;
 
-  if(WrappedID3D11Texture1D::m_TextureList.find(id) != WrappedID3D11Texture1D::m_TextureList.end())
+  if(WrappedID3D11Texture1D::m_TextureList.find(tex) != WrappedID3D11Texture1D::m_TextureList.end())
   {
     WrappedID3D11Texture1D *wrapTex =
-        (WrappedID3D11Texture1D *)WrappedID3D11Texture1D::m_TextureList[id].m_Texture;
+        (WrappedID3D11Texture1D *)WrappedID3D11Texture1D::m_TextureList[tex].m_Texture;
 
     D3D11_TEXTURE1D_DESC desc = {0};
     wrapTex->GetDesc(&desc);
@@ -2607,8 +2737,10 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
     if(mip >= mips || arrayIdx >= desc.ArraySize)
       return NULL;
 
-    if(forceRGBA8unorm)
+    if(params.remap)
     {
+      RDCASSERT(params.remap == eRemap_RGBA8);
+
       desc.Format =
           IsSRGBFormat(desc.Format) ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
       desc.ArraySize = 1;
@@ -2628,8 +2760,10 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
 
     bytesize = GetByteSize(desc.Width, 1, 1, desc.Format, mip);
 
-    if(forceRGBA8unorm)
+    if(params.remap)
     {
+      RDCASSERT(params.remap == eRemap_RGBA8);
+
       subresource = mip;
 
       desc.CPUAccessFlags = 0;
@@ -2686,11 +2820,11 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
         texDisplay.sampleIdx = 0;
         texDisplay.CustomShader = ResourceId();
         texDisplay.sliceFace = arrayIdx;
-        texDisplay.rangemin = blackPoint;
-        texDisplay.rangemax = whitePoint;
+        texDisplay.rangemin = params.blackPoint;
+        texDisplay.rangemax = params.whitePoint;
         texDisplay.scale = 1.0f;
-        texDisplay.texid = id;
-        texDisplay.typeHint = typeHint;
+        texDisplay.texid = tex;
+        texDisplay.typeHint = params.typeHint;
         texDisplay.rawoutput = false;
         texDisplay.offx = 0;
         texDisplay.offy = 0;
@@ -2711,11 +2845,11 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
       m_pImmediateContext->CopyResource(UNWRAP(WrappedID3D11Texture1D, d), wrapTex->GetReal());
     }
   }
-  else if(WrappedID3D11Texture2D1::m_TextureList.find(id) !=
+  else if(WrappedID3D11Texture2D1::m_TextureList.find(tex) !=
           WrappedID3D11Texture2D1::m_TextureList.end())
   {
     WrappedID3D11Texture2D1 *wrapTex =
-        (WrappedID3D11Texture2D1 *)WrappedID3D11Texture2D1::m_TextureList[id].m_Texture;
+        (WrappedID3D11Texture2D1 *)WrappedID3D11Texture2D1::m_TextureList[tex].m_Texture;
 
     D3D11_TEXTURE2D_DESC desc = {0};
     wrapTex->GetDesc(&desc);
@@ -2743,8 +2877,10 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
     if(mip >= mips || arrayIdx >= desc.ArraySize)
       return NULL;
 
-    if(forceRGBA8unorm)
+    if(params.remap)
     {
+      RDCASSERT(params.remap == eRemap_RGBA8);
+
       desc.Format =
           IsSRGBFormat(desc.Format) ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
       desc.ArraySize = 1;
@@ -2764,8 +2900,10 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
 
     bytesize = GetByteSize(desc.Width, desc.Height, 1, desc.Format, mip);
 
-    if(forceRGBA8unorm)
+    if(params.remap)
     {
+      RDCASSERT(params.remap == eRemap_RGBA8);
+
       subresource = mip;
 
       desc.CPUAccessFlags = 0;
@@ -2820,14 +2958,14 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
         texDisplay.overlay = eTexOverlay_None;
         texDisplay.FlipY = false;
         texDisplay.mip = mip;
-        texDisplay.sampleIdx = resolve ? ~0U : arrayIdx;
+        texDisplay.sampleIdx = params.resolve ? ~0U : arrayIdx;
         texDisplay.CustomShader = ResourceId();
         texDisplay.sliceFace = arrayIdx;
-        texDisplay.rangemin = blackPoint;
-        texDisplay.rangemax = whitePoint;
+        texDisplay.rangemin = params.blackPoint;
+        texDisplay.rangemax = params.whitePoint;
         texDisplay.scale = 1.0f;
-        texDisplay.texid = id;
-        texDisplay.typeHint = typeHint;
+        texDisplay.texid = tex;
+        texDisplay.typeHint = params.typeHint;
         texDisplay.rawoutput = false;
         texDisplay.offx = 0;
         texDisplay.offy = 0;
@@ -2843,7 +2981,7 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
 
       SAFE_RELEASE(wrappedrtv);
     }
-    else if(wasms && resolve)
+    else if(wasms && params.resolve)
     {
       desc.Usage = D3D11_USAGE_DEFAULT;
       desc.CPUAccessFlags = 0;
@@ -2875,11 +3013,11 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
       m_pImmediateContext->CopyResource(UNWRAP(WrappedID3D11Texture2D1, d), wrapTex->GetReal());
     }
   }
-  else if(WrappedID3D11Texture3D1::m_TextureList.find(id) !=
+  else if(WrappedID3D11Texture3D1::m_TextureList.find(tex) !=
           WrappedID3D11Texture3D1::m_TextureList.end())
   {
     WrappedID3D11Texture3D1 *wrapTex =
-        (WrappedID3D11Texture3D1 *)WrappedID3D11Texture3D1::m_TextureList[id].m_Texture;
+        (WrappedID3D11Texture3D1 *)WrappedID3D11Texture3D1::m_TextureList[tex].m_Texture;
 
     D3D11_TEXTURE3D_DESC desc = {0};
     wrapTex->GetDesc(&desc);
@@ -2896,9 +3034,13 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
     if(mip >= mips)
       return NULL;
 
-    if(forceRGBA8unorm)
+    if(params.remap)
+    {
+      RDCASSERT(params.remap == eRemap_RGBA8);
+
       desc.Format =
           IsSRGBFormat(desc.Format) ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+    }
 
     subresource = mip;
 
@@ -2914,8 +3056,10 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
 
     bytesize = GetByteSize(desc.Width, desc.Height, desc.Depth, desc.Format, mip);
 
-    if(forceRGBA8unorm)
+    if(params.remap)
     {
+      RDCASSERT(params.remap == eRemap_RGBA8);
+
       subresource = mip;
 
       desc.CPUAccessFlags = 0;
@@ -2979,11 +3123,11 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
         texDisplay.sampleIdx = 0;
         texDisplay.CustomShader = ResourceId();
         texDisplay.sliceFace = i << mip;
-        texDisplay.rangemin = blackPoint;
-        texDisplay.rangemax = whitePoint;
+        texDisplay.rangemin = params.blackPoint;
+        texDisplay.rangemax = params.whitePoint;
         texDisplay.scale = 1.0f;
-        texDisplay.texid = id;
-        texDisplay.typeHint = typeHint;
+        texDisplay.texid = tex;
+        texDisplay.typeHint = params.typeHint;
         texDisplay.rawoutput = false;
         texDisplay.offx = 0;
         texDisplay.offy = 0;
@@ -3006,7 +3150,7 @@ byte *D3D11DebugManager::GetTextureData(ResourceId id, uint32_t arrayIdx, uint32
   }
   else
   {
-    RDCERR("Trying to get texture data for unknown ID %llu!", id);
+    RDCERR("Trying to get texture data for unknown ID %llu!", tex);
     dataSize = 0;
     return new byte[0];
   }
@@ -3159,8 +3303,6 @@ void D3D11DebugManager::CreateCustomShaderTex(uint32_t w, uint32_t h)
     m_CustomShaderResourceId = GetIDForResource(m_CustomShaderTex);
   }
 }
-
-#include "data/hlsl/debugcbuffers.h"
 
 ResourceId D3D11DebugManager::RenderOverlay(ResourceId texid, FormatComponentType typeHint,
                                             TextureDisplayOverlay overlay, uint32_t eventID,
