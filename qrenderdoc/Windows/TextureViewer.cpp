@@ -31,19 +31,21 @@ TextureViewer::TextureViewer(Core *core, QWidget *parent)
 
   m_Core->AddLogViewer(this);
 
-  ui->render->SetOutput(NULL);
-  ui->pixelContext->SetOutput(NULL);
-  m_Output = NULL;
+  ui->render->SetOutput(m_Core, NULL);
+  ui->pixelContext->SetOutput(m_Core, NULL);
 
   m_PickedPoint = QPoint(-1, -1);
-  m_HighWaterStatusLength = 0;
 
   QWidget *renderContainer = ui->renderContainer;
 
-  QObject::connect(ui->render, &CustomPaintWidget::clicked, this,
-                   &TextureViewer::on_render_mousemove);
-  QObject::connect(ui->render, &CustomPaintWidget::mouseMove, this,
-                   &TextureViewer::on_render_mousemove);
+  QObject::connect(ui->render, &CustomPaintWidget::clicked, this, &TextureViewer::render_mouseClick);
+  QObject::connect(ui->render, &CustomPaintWidget::mouseMove, this, &TextureViewer::render_mouseMove);
+  QObject::connect(ui->render, &CustomPaintWidget::mouseWheel, this,
+                   &TextureViewer::render_mouseWheel);
+  QObject::connect(ui->render, &CustomPaintWidget::resize, this, &TextureViewer::render_resize);
+
+  QObject::connect(ui->zoomOption->lineEdit(), &QLineEdit::returnPressed, this,
+                   &TextureViewer::on_zoomOption_returnPressed);
 
   ui->dockarea->addToolWindow(ui->renderContainer, ToolWindowManager::EmptySpace);
   ui->dockarea->setToolWindowProperties(renderContainer, ToolWindowManager::DisallowUserDocking |
@@ -136,6 +138,29 @@ TextureViewer::TextureViewer(Core *core, QWidget *parent)
   Ui_TextureViewer *u = ui;
   u->pixelcontextgrid->setAlignment(u->pushButton, Qt::AlignCenter);
   u->pixelcontextgrid->setAlignment(u->pushButton_2, Qt::AlignCenter);
+
+  QWidget *statusflowWidget = new QWidget(this);
+
+  FlowLayout *statusflow = new FlowLayout(statusflowWidget, 0, 3, 0);
+
+  statusflowWidget->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
+
+  ui->statusbar->removeWidget(ui->texStatusDim);
+  ui->statusbar->removeWidget(ui->pickSwatch);
+  ui->statusbar->removeWidget(ui->statusText);
+
+  statusflow->addWidget(ui->texStatusDim);
+  statusflow->addWidget(ui->pickSwatch);
+  statusflow->addWidget(ui->statusText);
+
+  ui->statusbar->addWidget(statusflowWidget);
+
+  ui->zoomOption->addItems({"10%", "25%", "50%", "75%", "100%", "200%", "400%", "800%"});
+
+  ui->zoomOption->setCurrentText("");
+  ui->fitToWindow->toggle();
+
+  UI_UpdateTextureDetails();
 }
 
 TextureViewer::~TextureViewer()
@@ -193,6 +218,14 @@ void TextureViewer::RT_PickHoverAndUpdate()
   m_CurHoverValue = pickValue;
 
   GUIInvoke::call([this]() { UI_UpdateStatusText(); });
+}
+
+void TextureViewer::RT_UpdateAndDisplay()
+{
+  if(m_Output != NULL)
+    m_Output->SetTextureDisplay(m_TexDisplay);
+
+  GUIInvoke::call([this]() { ui->render->update(); });
 }
 
 void TextureViewer::UI_UpdateStatusText()
@@ -374,7 +407,136 @@ void TextureViewer::UI_UpdateStatusText()
   ui->statusText->setText(statusText);
 }
 
-void TextureViewer::on_render_mousemove(QMouseEvent *e)
+void TextureViewer::UI_UpdateTextureDetails()
+{
+  QString status;
+
+  FetchTexture *texptr = m_Core->GetTexture(m_TexDisplay.texid);
+  if(texptr == NULL)
+  {
+    ui->texStatusDim->setText(status);
+    return;
+  }
+
+  FetchTexture &current = *texptr;
+
+#if 0
+  ResourceId followID = m_Following.GetResourceId(m_Core);
+
+  {
+    bool found = false;
+
+    string name = "";
+
+    foreach(var t in m_Core.CurTextures)
+    {
+      if (t.ID == followID)
+      {
+        name = t.name;
+        found = true;
+      }
+    }
+
+    foreach(var b in m_Core.CurBuffers)
+    {
+      if (b.ID == followID)
+      {
+        name = b.name;
+        found = true;
+      }
+    }
+
+    if (followID == ResourceId.Null)
+    {
+      m_PreviewPanel.Text = "Unbound";
+    }
+    else if (found)
+    {
+      switch (m_Following.Type)
+      {
+        case FollowType.OutputColour:
+          m_PreviewPanel.Text = string.Format("Cur Output {0} - {1}", m_Following.index, name);
+          break;
+        case FollowType.OutputDepth:
+          m_PreviewPanel.Text = string.Format("Cur Depth Output - {0}", name);
+          break;
+        case FollowType.ReadWrite:
+          m_PreviewPanel.Text = string.Format("Cur RW Output - {0}", name);
+          break;
+        case FollowType.ReadOnly:
+          m_PreviewPanel.Text = string.Format("Cur Input {0} - {1}", m_Following.index, name);
+          break;
+      }
+    }
+    else
+    {
+      switch (m_Following.Type)
+      {
+        case FollowType.OutputColour:
+          m_PreviewPanel.Text = string.Format("Cur Output {0}", m_Following.index);
+          break;
+        case FollowType.OutputDepth:
+          m_PreviewPanel.Text = string.Format("Cur Depth Output");
+          break;
+        case FollowType.ReadWrite:
+          m_PreviewPanel.Text = string.Format("Cur RW Output");
+          break;
+        case FollowType.ReadOnly:
+          m_PreviewPanel.Text = string.Format("Cur Input {0}", m_Following.index);
+          break;
+      }
+    }
+  }
+#endif
+
+  status = QString(current.name.elems) + " - ";
+
+  if(current.dimension >= 1)
+    status += QString::number(current.width);
+  if(current.dimension >= 2)
+    status += "x" + QString::number(current.height);
+  if(current.dimension >= 3)
+    status += "x" + QString::number(current.depth);
+
+  if(current.arraysize > 1)
+    status += "[" + QString::number(current.arraysize) + "]";
+
+  if(current.msQual > 0 || current.msSamp > 1)
+    status += QString(" MS{%1x %2Q}").arg(current.msSamp).arg(current.msQual);
+
+  status += QString(" %1 mips").arg(current.mips);
+
+  status += " - " + QString(current.format.strname.elems);
+
+  if(current.format.compType != m_TexDisplay.typeHint && m_TexDisplay.typeHint != eCompType_None)
+  {
+    status += " Viewed as TODO";    // m_TexDisplay.typeHint.Str();
+  }
+
+  ui->texStatusDim->setText(status);
+}
+
+void TextureViewer::UI_OnTextureSelectionChanged(bool newdraw)
+{
+  UI_UpdateFittedScale();
+  UI_UpdateTextureDetails();
+}
+
+void TextureViewer::render_mouseWheel(QWheelEvent *e)
+{
+  QPoint cursorPos = e->pos();
+
+  setFitToWindow(false);
+
+  // scroll in logarithmic scale
+  double logScale = logf(m_TexDisplay.scale);
+  logScale += e->delta() / 2500.0;
+  UI_SetScale((float)expf(logScale), cursorPos.x(), cursorPos.y());
+
+  e->accept();
+}
+
+void TextureViewer::render_mouseMove(QMouseEvent *e)
 {
   m_CurHoverPixel.setX(int(((float)e->x() - m_TexDisplay.offx) / m_TexDisplay.scale));
   m_CurHoverPixel.setY(int(((float)e->y() - m_TexDisplay.offy) / m_TexDisplay.scale));
@@ -387,7 +549,7 @@ void TextureViewer::on_render_mousemove(QMouseEvent *e)
     {
       if(e->buttons() & Qt::RightButton)
       {
-        // ui->render->setCursor(cross);
+        ui->render->setCursor(QCursor(Qt::CrossCursor));
 
         m_PickedPoint = m_CurHoverPixel;
 
@@ -411,27 +573,159 @@ void TextureViewer::on_render_mousemove(QMouseEvent *e)
 
   QPoint curpos = QCursor::pos();
 
-  // QWidget *p = ui->renderContainer;
-
   if(e->buttons() & Qt::LeftButton)
   {
-    /*
-    if (qAbs(m_DragStartPos.x() - curpos.x()) > p.HorizontalScroll.SmallChange ||
-      qAbs(m_DragStartPos.y() - curpos.y()) > p.VerticalScroll.SmallChange)
+    if(qAbs(m_DragStartPos.x() - curpos.x()) > ui->renderHScroll->singleStep() ||
+       qAbs(m_DragStartPos.y() - curpos.y()) > ui->renderVScroll->singleStep())
     {
-      ScrollPosition = new Point(m_DragStartScroll.X + (curpos.X - m_DragStartPos.X),
-        m_DragStartScroll.Y + (curpos.Y - m_DragStartPos.Y));
-    }*/
+      setScrollPosition(QPoint(m_DragStartScroll.x() + (curpos.x() - m_DragStartPos.x()),
+                               m_DragStartScroll.y() + (curpos.y() - m_DragStartPos.y())));
+    }
 
-    // ui->render->setCursor(move2D);
+    ui->render->setCursor(QCursor(Qt::SizeAllCursor));
   }
 
   if(e->buttons() == Qt::NoButton)
   {
-    // ui->render->setCursor(default);
+    ui->render->setCursor(QCursor(Qt::ArrowCursor));
   }
 
   UI_UpdateStatusText();
+}
+
+void TextureViewer::render_mouseClick(QMouseEvent *e)
+{
+  ui->render->setFocus();
+
+  if(e->buttons() & Qt::RightButton)
+    render_mouseMove(e);
+
+  if(e->buttons() & Qt::LeftButton)
+  {
+    m_DragStartPos = QCursor::pos();
+    m_DragStartScroll = getScrollPosition();
+
+    ui->render->setCursor(QCursor(Qt::SizeAllCursor));
+  }
+}
+
+void TextureViewer::render_resize(QResizeEvent *e)
+{
+  UI_UpdateFittedScale();
+  UI_CalcScrollbars();
+
+  m_Core->Renderer()->AsyncInvoke([this](IReplayRenderer *) { RT_UpdateAndDisplay(); });
+}
+
+float TextureViewer::CurMaxScrollX()
+{
+  FetchTexture *texptr = m_Core->GetTexture(m_TexDisplay.texid);
+
+  QSizeF size(1.0f, 1.0f);
+
+  if(texptr != NULL)
+    size = QSizeF(texptr->width, texptr->height);
+
+  return ui->render->width() - size.width() * m_TexDisplay.scale;
+}
+
+float TextureViewer::CurMaxScrollY()
+{
+  FetchTexture *texptr = m_Core->GetTexture(m_TexDisplay.texid);
+
+  QSizeF size(1.0f, 1.0f);
+
+  if(texptr != NULL)
+    size = QSizeF(texptr->width, texptr->height);
+
+  return ui->render->height() - size.height() * m_TexDisplay.scale;
+}
+
+QPoint TextureViewer::getScrollPosition()
+{
+  return QPoint((int)m_TexDisplay.offx, m_TexDisplay.offy);
+}
+
+void TextureViewer::setScrollPosition(const QPoint &pos)
+{
+  m_TexDisplay.offx = qMax(CurMaxScrollX(), (float)pos.x());
+  m_TexDisplay.offy = qMax(CurMaxScrollY(), (float)pos.y());
+
+  m_TexDisplay.offx = qMin(0.0f, m_TexDisplay.offx);
+  m_TexDisplay.offy = qMin(0.0f, m_TexDisplay.offy);
+
+  if(ScrollUpdateScrollbars)
+  {
+    if(ui->renderHScroll->isEnabled())
+      ui->renderHScroll->setValue(qBound(0, int(m_TexDisplay.offx), ui->renderHScroll->maximum()));
+
+    if(ui->renderVScroll->isEnabled())
+      ui->renderVScroll->setValue(qBound(0, int(m_TexDisplay.offy), ui->renderVScroll->maximum()));
+  }
+
+  m_Core->Renderer()->AsyncInvoke([this](IReplayRenderer *) { RT_UpdateAndDisplay(); });
+}
+
+void TextureViewer::UI_CalcScrollbars()
+{
+  FetchTexture *texptr = m_Core->GetTexture(m_TexDisplay.texid);
+
+  QSizeF size(1.0f, 1.0f);
+
+  if(texptr != NULL)
+  {
+    size = QSizeF(texptr->width, texptr->height);
+  }
+
+  if((int)floor(size.width() * m_TexDisplay.scale) <= ui->render->width())
+  {
+    ui->renderHScroll->setEnabled(false);
+  }
+  else
+  {
+    ui->renderHScroll->setEnabled(true);
+
+    ui->renderHScroll->setMaximum(
+        (int)ceil(size.width() * m_TexDisplay.scale - (float)ui->render->width()));
+    ui->renderHScroll->setPageStep(qMax(1, ui->renderHScroll->maximum() / 6));
+  }
+
+  if((int)floor(size.height() * m_TexDisplay.scale) <= ui->render->height())
+  {
+    ui->renderVScroll->setEnabled(false);
+  }
+  else
+  {
+    ui->renderVScroll->setEnabled(true);
+
+    ui->renderVScroll->setMaximum(
+        (int)ceil(size.height() * m_TexDisplay.scale - (float)ui->render->height()));
+    ui->renderVScroll->setPageStep(qMax(1, ui->renderVScroll->maximum() / 6));
+  }
+}
+
+void TextureViewer::on_renderHScroll_valueChanged(int position)
+{
+  ScrollUpdateScrollbars = false;
+
+  {
+    float delta = (float)position / (float)ui->renderHScroll->maximum();
+    setScrollPosition(QPoint((int)(CurMaxScrollX() * delta), getScrollPosition().y()));
+  }
+
+  ScrollUpdateScrollbars = true;
+}
+
+void TextureViewer::on_renderVScroll_valueChanged(int position)
+{
+  ScrollUpdateScrollbars = false;
+
+  {
+    float delta = (float)position / (float)ui->renderVScroll->maximum();
+    setScrollPosition(QPoint(getScrollPosition().x(), (int)(CurMaxScrollY() * delta)));
+  }
+
+  ScrollUpdateScrollbars = true;
 }
 
 void TextureViewer::OnLogfileLoaded()
@@ -485,7 +779,7 @@ void TextureViewer::OnLogfileLoaded()
 
   m_Core->Renderer()->BlockInvoke([system, wnd, this](IReplayRenderer *r) {
     m_Output = r->CreateOutput(system, wnd, eOutputType_TexDisplay);
-    ui->render->SetOutput(m_Output);
+    ui->render->SetOutput(m_Core, m_Output);
 
     OutputConfig c = {eOutputType_TexDisplay};
     m_Output->SetOutputConfig(c);
@@ -495,62 +789,175 @@ void TextureViewer::OnLogfileLoaded()
 void TextureViewer::OnLogfileClosed()
 {
   m_Output = NULL;
-  ui->render->SetOutput(NULL);
+  ui->render->SetOutput(m_Core, NULL);
+
+  UI_UpdateTextureDetails();
 }
 
 void TextureViewer::OnEventSelected(uint32_t eventID)
 {
-  m_Core->Renderer()->AsyncInvoke([this](IReplayRenderer *) {
+  TextureDisplay &d = m_TexDisplay;
 
-    TextureDisplay &d = m_TexDisplay;
+  if(m_Core->APIProps().pipelineType == eGraphicsAPI_D3D11)
+  {
+    d.texid = m_Core->CurD3D11PipelineState.m_OM.RenderTargets[0].Resource;
+  }
+  else if(m_Core->APIProps().pipelineType == eGraphicsAPI_OpenGL)
+  {
+    d.texid = m_Core->CurGLPipelineState.m_FB.m_DrawFBO.Color[0].Obj;
+  }
+  else
+  {
+    const VulkanPipelineState &pipe = m_Core->CurVulkanPipelineState;
+    if(pipe.Pass.renderpass.colorAttachments.count > 0)
+      d.texid = pipe.Pass.framebuffer.attachments[pipe.Pass.renderpass.colorAttachments[0]].img;
 
-    if(m_Core->APIProps().pipelineType == eGraphicsAPI_D3D11)
+    if(d.texid == ResourceId())
     {
-      d.texid = m_Core->CurD3D11PipelineState.m_OM.RenderTargets[0].Resource;
+      const FetchDrawcall *draw = m_Core->CurDrawcall();
+      if(draw)
+        d.texid = draw->copyDestination;
     }
-    else if(m_Core->APIProps().pipelineType == eGraphicsAPI_OpenGL)
-    {
-      d.texid = m_Core->CurGLPipelineState.m_FB.m_DrawFBO.Color[0].Obj;
-    }
-    else
-    {
-      const VulkanPipelineState &pipe = m_Core->CurVulkanPipelineState;
-      if(pipe.Pass.renderpass.colorAttachments.count > 0)
-        d.texid = pipe.Pass.framebuffer.attachments[pipe.Pass.renderpass.colorAttachments[0]].img;
+  }
 
-      if(d.texid == ResourceId())
-      {
-        const FetchDrawcall *draw = m_Core->CurDrawcall();
-        if(draw)
-          d.texid = draw->copyDestination;
-      }
-    }
-    d.mip = 0;
-    d.sampleIdx = ~0U;
-    d.overlay = eTexOverlay_None;
-    d.CustomShader = ResourceId();
-    d.HDRMul = -1.0f;
-    d.linearDisplayAsGamma = true;
-    d.FlipY = false;
-    d.rangemin = 0.0f;
-    d.rangemax = 1.0f;
-    d.scale = -1.0f;
-    d.offx = 0.0f;
-    d.offy = 0.0f;
-    d.sliceFace = 0;
-    d.rawoutput = false;
-    d.lightBackgroundColour = d.darkBackgroundColour = FloatVector(0.0f, 0.0f, 0.0f, 0.0f);
-    d.Red = d.Green = d.Blue = true;
-    d.Alpha = false;
-    m_Output->SetTextureDisplay(d);
+  d.mip = 0;
+  d.sampleIdx = ~0U;
+  d.overlay = eTexOverlay_None;
+  d.CustomShader = ResourceId();
+  d.HDRMul = -1.0f;
+  d.linearDisplayAsGamma = true;
+  d.FlipY = false;
+  d.rangemin = 0.0f;
+  d.rangemax = 1.0f;
+  d.scale = 1.0f;
+  d.offx = 0.0f;
+  d.offy = 0.0f;
+  d.sliceFace = 0;
+  d.rawoutput = false;
+  d.lightBackgroundColour = d.darkBackgroundColour = FloatVector(0.0f, 0.0f, 0.0f, 0.0f);
+  d.Red = d.Green = d.Blue = true;
+  d.Alpha = false;
 
-    FetchTexture *tex = m_Core->GetTexture(d.texid);
+  m_Core->Renderer()->AsyncInvoke([this](IReplayRenderer *) { RT_UpdateAndDisplay(); });
 
-    GUIInvoke::call([this, tex]() {
-      if(tex)
-        ui->renderContainer->setWindowTitle(tr(tex->name.elems));
+  FetchTexture *tex = m_Core->GetTexture(d.texid);
 
-      ui->render->update();
-    });
-  });
+  if(tex)
+    ui->renderContainer->setWindowTitle(tr(tex->name.elems));
+
+  // if (!CurrentTextureIsLocked || (CurrentTexture != null && m_TexDisplay.texid !=
+  // CurrentTexture.ID))
+  UI_OnTextureSelectionChanged(true);
+}
+
+float TextureViewer::GetFitScale()
+{
+  FetchTexture *texptr = m_Core->GetTexture(m_TexDisplay.texid);
+
+  if(texptr == NULL)
+    return 1.0f;
+
+  float xscale = (float)ui->render->width() / (float)texptr->width;
+  float yscale = (float)ui->render->height() / (float)texptr->height;
+  return qMin(xscale, yscale);
+}
+
+void TextureViewer::UI_UpdateFittedScale()
+{
+  if(ui->fitToWindow->isChecked())
+    UI_SetScale(1.0f);
+}
+
+void TextureViewer::UI_SetScale(float s)
+{
+  UI_SetScale(s, ui->render->width() / 2, ui->render->height() / 2);
+}
+
+void TextureViewer::UI_SetScale(float s, int x, int y)
+{
+  if(ui->fitToWindow->isChecked())
+    s = GetFitScale();
+
+  float prevScale = m_TexDisplay.scale;
+
+  m_TexDisplay.scale = qBound(0.1f, s, 256.0f);
+
+  m_Core->Renderer()->AsyncInvoke([this](IReplayRenderer *) { RT_UpdateAndDisplay(); });
+
+  float scaleDelta = (m_TexDisplay.scale / prevScale);
+
+  QPoint newPos = getScrollPosition();
+
+  newPos -= QPoint(x, y);
+  newPos = QPoint((int)(newPos.x() * scaleDelta), (int)(newPos.y() * scaleDelta));
+  newPos += QPoint(x, y);
+
+  setScrollPosition(newPos);
+
+  setCurrentZoomValue(m_TexDisplay.scale);
+
+  UI_CalcScrollbars();
+}
+
+void TextureViewer::setCurrentZoomValue(float zoom)
+{
+  ui->zoomOption->setCurrentText(QString::number(ceil(zoom * 100)) + "%");
+}
+
+float TextureViewer::getCurrentZoomValue()
+{
+  if(ui->fitToWindow->isChecked())
+    return m_TexDisplay.scale;
+
+  QString zoomText = ui->zoomOption->currentText().replace('%', ' ');
+
+  bool ok = false;
+  int zoom = zoomText.toInt(&ok);
+
+  if(!ok)
+    zoom = 100;
+
+  return (float)(zoom) / 100.0f;
+}
+
+void TextureViewer::setFitToWindow(bool checked)
+{
+  if(checked)
+  {
+    UI_UpdateFittedScale();
+    ui->fitToWindow->setChecked(true);
+  }
+  else if(!checked)
+  {
+    ui->fitToWindow->setChecked(false);
+    float curScale = m_TexDisplay.scale;
+    ui->zoomOption->setCurrentText("");
+    setCurrentZoomValue(curScale);
+  }
+}
+
+void TextureViewer::on_fitToWindow_toggled(bool checked)
+{
+  UI_UpdateFittedScale();
+}
+
+void TextureViewer::on_zoomExactSize_clicked()
+{
+  ui->fitToWindow->setChecked(false);
+  UI_SetScale(1.0f);
+}
+
+void TextureViewer::on_zoomOption_currentIndexChanged(int index)
+{
+  if(index >= 0)
+  {
+    setFitToWindow(false);
+    ui->zoomOption->setCurrentText(ui->zoomOption->itemText(index));
+    UI_SetScale(getCurrentZoomValue());
+  }
+}
+
+void TextureViewer::on_zoomOption_returnPressed()
+{
+  UI_SetScale(getCurrentZoomValue());
 }
