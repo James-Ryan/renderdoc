@@ -281,7 +281,17 @@ extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_FreeEnvironmentModification
 
 extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_LogText(const char *text)
 {
-  RDCLOG("%s", text);
+  rdclog_int(RDCLog_Comment, "EXT", "external", 0, "%s", text);
+}
+
+extern "C" RENDERDOC_API void RENDERDOC_CC RENDERDOC_LogMessage(LogMessageType type,
+                                                                const char *project, const char *file,
+                                                                unsigned int line, const char *text)
+{
+  RDCCOMPILE_ASSERT(
+      (int)eLogType_First == (int)RDCLog_First && (int)eLogType_NumTypes == (int)eLogType_NumTypes,
+      "Log type enum is out of sync");
+  rdclog_int((LogType)type, project ? project : "UNK?", file ? file : "unknown", line, "%s", text);
 }
 
 extern "C" RENDERDOC_API const char *RENDERDOC_CC RENDERDOC_GetLogFile()

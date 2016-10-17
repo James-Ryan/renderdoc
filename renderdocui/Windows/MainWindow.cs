@@ -1182,7 +1182,7 @@ namespace renderdocui.Windows
                 // allow live captures to this host to stay open, that way
                 // we can connect to a live capture, then switch into that
                 // context
-                if (live.Hostname == host.Hostname)
+                if (host != null && live.Hostname == host.Hostname)
                     continue;
 
                 live.CleanItems();
@@ -1654,6 +1654,26 @@ namespace renderdocui.Windows
                         }
                     }
                 }
+
+                if (keyData == (Keys.Control | Keys.Left))
+                {
+                    FetchDrawcall draw = m_Core.CurDrawcall;
+
+                    if (draw != null && draw.previous != null)
+                        m_Core.SetEventID(null, draw.previous.eventID);
+
+                    return true;
+                }
+
+                if (keyData == (Keys.Control | Keys.Right))
+                {
+                    FetchDrawcall draw = m_Core.CurDrawcall;
+
+                    if (draw != null && draw.next != null)
+                        m_Core.SetEventID(null, draw.next.eventID);
+
+                    return true;
+                }
             }
             return base.ProcessCmdKey(ref msg, keyData);
         }
@@ -1943,5 +1963,15 @@ namespace renderdocui.Windows
         }
 
     #endregion
+
+        private void startAndroidRemoteServerToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            // /K to keep the window open after finishing.
+            // We want to see the output, e.g. to see if adb is on the path.
+            ProcessStartInfo processInfo = new ProcessStartInfo("cmd.exe", "/K android_remoteserver.bat");
+
+            Process process = Process.Start(processInfo);
+            process.Close();
+        }
     }
 }

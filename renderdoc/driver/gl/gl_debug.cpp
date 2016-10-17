@@ -671,7 +671,7 @@ void GLReplay::DeleteDebugData()
 bool GLReplay::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t mip, uint32_t sample,
                          FormatComponentType typeHint, float *minval, float *maxval)
 {
-  if(m_pDriver->m_Textures.find(texid) == m_pDriver->m_Textures.end())
+  if(texid == ResourceId() || m_pDriver->m_Textures.find(texid) == m_pDriver->m_Textures.end())
     return false;
 
   auto &texDetails = m_pDriver->m_Textures[texid];
@@ -744,7 +744,10 @@ bool GLReplay::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t mip, uin
   cdata->HistogramTextureResolution.x = (float)RDCMAX(details.width >> mip, 1U);
   cdata->HistogramTextureResolution.y = (float)RDCMAX(details.height >> mip, 1U);
   cdata->HistogramTextureResolution.z = (float)RDCMAX(details.depth >> mip, 1U);
-  cdata->HistogramSlice = (float)sliceFace;
+  if(texDetails.curType != eGL_TEXTURE_3D)
+    cdata->HistogramSlice = (float)sliceFace + 0.001f;
+  else
+    cdata->HistogramSlice = (float)(sliceFace >> mip);
   cdata->HistogramMip = (int)mip;
   cdata->HistogramNumSamples = texDetails.samples;
   cdata->HistogramSample = (int)RDCCLAMP(sample, 0U, details.msSamp - 1);
@@ -766,9 +769,6 @@ bool GLReplay::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t mip, uin
     progIdx |= TEXDISPLAY_SINT_TEX;
     intIdx = 2;
   }
-
-  if(details.dimension == 3)
-    cdata->HistogramSlice = float(sliceFace) / float(details.depth);
 
   int blocksX = (int)ceil(cdata->HistogramTextureResolution.x /
                           float(HGRAM_PIXELS_PER_TILE * HGRAM_TILES_PER_BLOCK));
@@ -839,7 +839,7 @@ bool GLReplay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t mip, 
                             FormatComponentType typeHint, float minval, float maxval,
                             bool channels[4], vector<uint32_t> &histogram)
 {
-  if(minval >= maxval)
+  if(minval >= maxval || texid == ResourceId())
     return false;
 
   if(m_pDriver->m_Textures.find(texid) == m_pDriver->m_Textures.end())
@@ -915,7 +915,10 @@ bool GLReplay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t mip, 
   cdata->HistogramTextureResolution.x = (float)RDCMAX(details.width >> mip, 1U);
   cdata->HistogramTextureResolution.y = (float)RDCMAX(details.height >> mip, 1U);
   cdata->HistogramTextureResolution.z = (float)RDCMAX(details.depth >> mip, 1U);
-  cdata->HistogramSlice = (float)sliceFace;
+  if(texDetails.curType != eGL_TEXTURE_3D)
+    cdata->HistogramSlice = (float)sliceFace + 0.001f;
+  else
+    cdata->HistogramSlice = (float)(sliceFace >> mip);
   cdata->HistogramMip = mip;
   cdata->HistogramNumSamples = texDetails.samples;
   cdata->HistogramSample = (int)RDCCLAMP(sample, 0U, details.msSamp - 1);
@@ -951,9 +954,6 @@ bool GLReplay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t mip, 
     progIdx |= TEXDISPLAY_SINT_TEX;
     intIdx = 2;
   }
-
-  if(details.dimension == 3)
-    cdata->HistogramSlice = float(sliceFace) / float(details.depth);
 
   int blocksX = (int)ceil(cdata->HistogramTextureResolution.x /
                           float(HGRAM_PIXELS_PER_TILE * HGRAM_TILES_PER_BLOCK));
@@ -1180,14 +1180,21 @@ uint32_t GLReplay::PickVertex(uint32_t eventID, const MeshDisplay &cfg, uint32_t
     }
 
     byte *idxs = new byte[cfg.position.numVerts * cfg.position.idxByteWidth];
+    memset(idxs, 0, cfg.position.numVerts * cfg.position.idxByteWidth);
     uint32_t *outidxs = NULL;
 
     if(cfg.position.idxByteWidth < 4)
       outidxs = new uint32_t[cfg.position.numVerts];
 
     gl.glBindBuffer(eGL_COPY_READ_BUFFER, ib);
+
+    GLint bufsize = 0;
+    gl.glGetBufferParameteriv(eGL_COPY_READ_BUFFER, eGL_BUFFER_SIZE, &bufsize);
+
     gl.glGetBufferSubData(eGL_COPY_READ_BUFFER, (GLintptr)cfg.position.idxoffs,
-                          cfg.position.numVerts * cfg.position.idxByteWidth, idxs);
+                          RDCMIN(uint32_t(bufsize) - uint32_t(cfg.position.idxoffs),
+                                 cfg.position.numVerts * cfg.position.idxByteWidth),
+                          idxs);
 
     uint16_t *idxs16 = (uint16_t *)idxs;
 
@@ -1383,7 +1390,7 @@ void GLReplay::PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_t sl
   texDisplay.offx = -float(x);
   texDisplay.offy = -float(y);
 
-  RenderTextureInternal(texDisplay, false);
+  RenderTextureInternal(texDisplay, eTexDisplay_MipShift);
 
   gl.glReadPixels(0, 0, 1, 1, eGL_RGBA, eGL_FLOAT, (void *)pixel);
 
@@ -1398,7 +1405,7 @@ void GLReplay::PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_t sl
     {
       texDisplay.Red = texDisplay.Blue = texDisplay.Alpha = false;
 
-      RenderTextureInternal(texDisplay, false);
+      RenderTextureInternal(texDisplay, eTexDisplay_MipShift);
 
       uint32_t stencilpixel[4];
       gl.glReadPixels(0, 0, 1, 1, eGL_RGBA, eGL_FLOAT, (void *)stencilpixel);
@@ -1484,11 +1491,14 @@ void GLReplay::CopyTex2DMSToArray(GLuint destArray, GLuint srcMS, GLint width, G
 
 bool GLReplay::RenderTexture(TextureDisplay cfg)
 {
-  return RenderTextureInternal(cfg, true);
+  return RenderTextureInternal(cfg, eTexDisplay_BlendAlpha | eTexDisplay_MipShift);
 }
 
-bool GLReplay::RenderTextureInternal(TextureDisplay cfg, bool blendAlpha)
+bool GLReplay::RenderTextureInternal(TextureDisplay cfg, int flags)
 {
+  const bool blendAlpha = (flags & eTexDisplay_BlendAlpha) != 0;
+  const bool mipShift = (flags & eTexDisplay_MipShift) != 0;
+
   WrappedOpenGL &gl = *m_pDriver;
 
   auto &texDetails = m_pDriver->m_Textures[cfg.texid];
@@ -1774,16 +1784,14 @@ bool GLReplay::RenderTextureInternal(TextureDisplay cfg, bool blendAlpha)
 
   ubo->RawOutput = cfg.rawoutput ? 1 : 0;
 
-  ubo->TextureResolutionPS.x = float(tex_x);
-  ubo->TextureResolutionPS.y = float(tex_y);
-  ubo->TextureResolutionPS.z = float(tex_z);
+  ubo->TextureResolutionPS.x = float(RDCMAX(1, tex_x >> cfg.mip));
+  ubo->TextureResolutionPS.y = float(RDCMAX(1, tex_y >> cfg.mip));
+  ubo->TextureResolutionPS.z = float(RDCMAX(1, tex_z >> cfg.mip));
 
-  float mipScale = float(1 << cfg.mip);
-
-  ubo->Scale *= mipScale;
-  ubo->TextureResolutionPS.x /= mipScale;
-  ubo->TextureResolutionPS.y /= mipScale;
-  ubo->TextureResolutionPS.z /= mipScale;
+  if(mipShift)
+    ubo->MipShift = float(1 << cfg.mip);
+  else
+    ubo->MipShift = 1.0f;
 
   ubo->OutputRes.x = DebugData.outWidth;
   ubo->OutputRes.y = DebugData.outHeight;

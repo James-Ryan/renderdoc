@@ -187,7 +187,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="d3d9_common.cpp" />
+    <ClCompile Include="d3d9_debug.cpp" />
+    <ClCompile Include="d3d9_device.cpp" />
     <ClCompile Include="d3d9_hooks.cpp" />
+    <ClCompile Include="d3d9_replay.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\dx\official\d3d9.h" />
@@ -195,6 +199,9 @@
     <ClInclude Include="..\dx\official\d3d9types.h" />
     <ClInclude Include="..\dx\official\d3dcommon.h" />
     <ClInclude Include="..\dx\official\d3dcompiler.h" />
+    <ClInclude Include="d3d9_common.h" />
+    <ClInclude Include="d3d9_debug.h" />
+    <ClInclude Include="d3d9_device.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

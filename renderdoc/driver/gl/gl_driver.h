@@ -53,10 +53,10 @@ struct GLInitParams : public RDCInitParams
   uint32_t width;
   uint32_t height;
 
-  static const uint32_t GL_SERIALISE_VERSION = 0x0000011;
+  static const uint32_t GL_SERIALISE_VERSION = 0x0000012;
 
   // backwards compatibility for old logs described at the declaration of this array
-  static const uint32_t GL_NUM_SUPPORTED_OLD_VERSIONS = 1;
+  static const uint32_t GL_NUM_SUPPORTED_OLD_VERSIONS = 2;
   static const uint32_t GL_OLD_VERSIONS[GL_NUM_SUPPORTED_OLD_VERSIONS];
 
   // version number internal to opengl stream
@@ -177,10 +177,6 @@ private:
 
   CaptureFailReason m_FailureReason;
   bool m_SuccessfulCapture;
-
-  PerformanceTimer m_FrameTimer;
-  vector<double> m_FrameTimes;
-  double m_TotalTime, m_AvgFrametime, m_MinFrametime, m_MaxFrametime;
 
   set<ResourceId> m_HighTrafficResources;
 
@@ -330,7 +326,6 @@ private:
 
   ResourceId m_FakeVAOID;
 
-  Serialiser *GetSerialiser() { return m_pSerialiser; }
   uint32_t GetLogVersion() { return m_InitParams.SerialiseVersion; }
   void ProcessChunk(uint64_t offset, GLChunkType context);
   void ContextReplayLog(LogState readType, uint32_t startEventID, uint32_t endEventID, bool partial);
@@ -504,6 +499,7 @@ public:
   void ReplayLog(uint32_t startEventID, uint32_t endEventID, ReplayLogType replayType);
   void ReadLogInitialisation();
 
+  Serialiser *GetSerialiser() { return m_pSerialiser; }
   GLuint GetFakeBBFBO() { return m_FakeBB_FBO; }
   GLuint GetFakeVAO() { return m_FakeVAO; }
   FetchFrameRecord &GetFrameRecord() { return m_FrameRecord; }

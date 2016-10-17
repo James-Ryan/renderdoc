@@ -1723,7 +1723,7 @@ namespace renderdocui.Windows
 
             sliceFace.Items.Clear();
 
-            if (tex.numSubresources == tex.mips && tex.depth <= 1)
+            if (tex.arraysize == 1 && tex.depth <= 1)
             {
                 sliceFace.Enabled = false;
             }
@@ -1735,7 +1735,7 @@ namespace renderdocui.Windows
 
                 String[] cubeFaces = { "X+", "X-", "Y+", "Y-", "Z+", "Z-" };
 
-                UInt32 numSlices = (Math.Max(1, tex.depth) * tex.numSubresources) / tex.mips;
+                UInt32 numSlices = tex.arraysize;
 
                 // for 3D textures, display the number of slices at this mip
                 if(tex.depth > 1)
@@ -3184,6 +3184,7 @@ namespace renderdocui.Windows
                 return;
             }
 
+            m_Core.Renderer.BeginInvoke(RT_UpdateAndDisplay);
             m_Core.Renderer.BeginInvoke(RT_UpdateVisualRange);
 
             if (m_Output != null && m_PickedPoint.X >= 0 && m_PickedPoint.Y >= 0)
@@ -3194,8 +3195,6 @@ namespace renderdocui.Windows
                         RT_PickPixelsAndUpdate(m_PickedPoint.X, m_PickedPoint.Y, true);
                 });
             }
-
-            m_Core.Renderer.BeginInvoke(RT_UpdateAndDisplay);
         }
 
         private void overlay_SelectedIndexChanged(object sender, EventArgs e)
@@ -3215,6 +3214,7 @@ namespace renderdocui.Windows
             if (CurrentTexture.depth > 1)
                 m_TexDisplay.sliceFace = (UInt32)(sliceFace.SelectedIndex << (int)m_TexDisplay.mip);
 
+            m_Core.Renderer.BeginInvoke(RT_UpdateAndDisplay);
             m_Core.Renderer.BeginInvoke(RT_UpdateVisualRange);
 
             if (m_Output != null && m_PickedPoint.X >= 0 && m_PickedPoint.Y >= 0)
@@ -3226,7 +3226,6 @@ namespace renderdocui.Windows
                 });
             }
 
-            m_Core.Renderer.BeginInvoke(RT_UpdateAndDisplay);
         }
 
         private void updateChannelsHandler(object sender, EventArgs e)
@@ -3331,16 +3330,13 @@ namespace renderdocui.Windows
         private void AutoFitRange()
         {
             // no log loaded or buffer/empty texture currently being viewed - don't autofit
-            if (!m_Core.LogLoaded || CurrentTexture == null)
+            if (!m_Core.LogLoaded || CurrentTexture == null || m_Output == null)
                 return;
 
             m_Core.Renderer.BeginInvoke((ReplayRenderer r) =>
             {
                 PixelValue min, max;
-                bool success = r.GetMinMax(m_TexDisplay.texid,
-                    m_TexDisplay.sliceFace, m_TexDisplay.mip, m_TexDisplay.sampleIdx,
-                    m_TexDisplay.typeHint,
-                    out min, out max);
+                bool success = m_Output.GetMinMax(out min, out max);
 
                 if (success)
                 {
@@ -3350,6 +3346,11 @@ namespace renderdocui.Windows
                     bool changeRange = false;
 
                     ResourceFormat fmt = CurrentTexture.format;
+
+                    if (m_TexDisplay.CustomShader != ResourceId.Null)
+                    {
+                        fmt.compType = FormatComponentType.Float;
+                    }
 
                     for (int i = 0; i < 4; i++)
                     {
@@ -3424,17 +3425,17 @@ namespace renderdocui.Windows
 
         private void RT_UpdateVisualRange(ReplayRenderer r)
         {
-            if (!m_Visualise || CurrentTexture == null) return;
+            if (!m_Visualise || CurrentTexture == null || m_Output == null) return;
 
             ResourceFormat fmt = CurrentTexture.format;
+
+            if (m_TexDisplay.CustomShader != ResourceId.Null)
+                fmt.compCount = 4;
 
             bool success = true;
 
             uint[] histogram;
-            success = r.GetHistogram(m_TexDisplay.texid,
-                                     m_TexDisplay.sliceFace, m_TexDisplay.mip, m_TexDisplay.sampleIdx,
-                                     m_TexDisplay.typeHint,
-                                     rangeHistogram.RangeMin, rangeHistogram.RangeMax,
+            success = m_Output.GetHistogram(rangeHistogram.RangeMin, rangeHistogram.RangeMax,
                                      m_TexDisplay.Red,
                                      m_TexDisplay.Green && fmt.compCount > 1,
                                      m_TexDisplay.Blue && fmt.compCount > 2,

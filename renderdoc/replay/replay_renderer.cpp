@@ -397,41 +397,6 @@ bool ReplayRenderer::GetPostVSData(uint32_t instID, MeshDataStage stage, MeshFor
   return true;
 }
 
-bool ReplayRenderer::GetMinMax(ResourceId tex, uint32_t sliceFace, uint32_t mip, uint32_t sample,
-                               FormatComponentType typeHint, PixelValue *minval, PixelValue *maxval)
-{
-  PixelValue *a = minval;
-  PixelValue *b = maxval;
-
-  PixelValue dummy;
-
-  if(a == NULL)
-    a = &dummy;
-  if(b == NULL)
-    b = &dummy;
-
-  return m_pDevice->GetMinMax(m_pDevice->GetLiveID(tex), sliceFace, mip, sample, typeHint,
-                              &a->value_f[0], &b->value_f[0]);
-}
-
-bool ReplayRenderer::GetHistogram(ResourceId tex, uint32_t sliceFace, uint32_t mip, uint32_t sample,
-                                  FormatComponentType typeHint, float minval, float maxval,
-                                  bool channels[4], rdctype::array<uint32_t> *histogram)
-{
-  if(histogram == NULL)
-    return false;
-
-  vector<uint32_t> hist;
-
-  bool ret = m_pDevice->GetHistogram(m_pDevice->GetLiveID(tex), sliceFace, mip, sample, typeHint,
-                                     minval, maxval, channels, hist);
-
-  if(ret)
-    *histogram = hist;
-
-  return ret;
-}
-
 bool ReplayRenderer::GetBufferData(ResourceId buff, uint64_t offset, uint64_t len,
                                    rdctype::array<byte> *data)
 {
@@ -658,7 +623,8 @@ bool ReplayRenderer::SaveTexture(const TextureSave &saveData, const char *path)
   // for DDS don't downcast, for non-HDR always downcast if we're not already RGBA8 unorm
   // for HDR&EXR we can convert from most regular types as well as 10.10.10.2 and 11.11.10
   if((sd.destType != eFileType_DDS && sd.destType != eFileType_HDR && sd.destType != eFileType_EXR &&
-      (td.format.compByteWidth != 1 || td.format.compType != eCompType_UNorm || td.format.bgraOrder)) ||
+      (td.format.compByteWidth != 1 || td.format.compCount != 4 ||
+       td.format.compType != eCompType_UNorm || td.format.bgraOrder)) ||
      downcast || (sd.destType != eFileType_DDS && td.format.special &&
                   td.format.specialFormat != eSpecial_R10G10B10A2 &&
                   td.format.specialFormat != eSpecial_R11G11B10))
@@ -1890,21 +1856,6 @@ extern "C" RENDERDOC_API bool32 RENDERDOC_CC ReplayRenderer_GetPostVSData(Replay
                                                                           MeshFormat *data)
 {
   return rend->GetPostVSData(instID, stage, data);
-}
-
-extern "C" RENDERDOC_API bool32 RENDERDOC_CC ReplayRenderer_GetMinMax(
-    ReplayRenderer *rend, ResourceId tex, uint32_t sliceFace, uint32_t mip, uint32_t sample,
-    FormatComponentType typeHint, PixelValue *minval, PixelValue *maxval)
-{
-  return rend->GetMinMax(tex, sliceFace, mip, sample, typeHint, minval, maxval);
-}
-extern "C" RENDERDOC_API bool32 RENDERDOC_CC
-ReplayRenderer_GetHistogram(ReplayRenderer *rend, ResourceId tex, uint32_t sliceFace, uint32_t mip,
-                            uint32_t sample, FormatComponentType typeHint, float minval,
-                            float maxval, bool32 channels[4], rdctype::array<uint32_t> *histogram)
-{
-  bool chans[4] = {channels[0] != 0, channels[1] != 0, channels[2] != 0, channels[3] != 0};
-  return rend->GetHistogram(tex, sliceFace, mip, sample, typeHint, minval, maxval, chans, histogram);
 }
 
 extern "C" RENDERDOC_API bool32 RENDERDOC_CC ReplayRenderer_GetBufferData(

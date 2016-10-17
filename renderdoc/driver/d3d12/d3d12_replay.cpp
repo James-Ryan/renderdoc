@@ -151,10 +151,9 @@ FetchTexture D3D12Replay::GetTexture(ResourceId id)
   ret.height = desc.Height;
   ret.depth = desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D ? desc.DepthOrArraySize : 1;
   ret.arraysize = desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE3D ? desc.DepthOrArraySize : 1;
-  ret.numSubresources = GetNumSubresources(&desc);
   ret.mips = desc.MipLevels;
   ret.msQual = desc.SampleDesc.Quality;
-  ret.msSamp = desc.SampleDesc.Count;
+  ret.msSamp = RDCMAX(1U, desc.SampleDesc.Count);
   ret.byteSize = 0;
   for(uint32_t i = 0; i < ret.mips; i++)
     ret.byteSize += GetByteSize(ret.width, ret.height, ret.depth, desc.Format, i);
@@ -654,6 +653,7 @@ void D3D12Replay::FillRegisterSpaces(
             D3D12PipelineState::Sampler &samp = spaces[regSpace].samplers[shaderReg];
             samp.Immediate = false;
             samp.RootElement = (uint32_t)rootEl;
+            samp.TableIndex = offset + i;
 
             if(desc)
             {
@@ -697,6 +697,7 @@ void D3D12Replay::FillRegisterSpaces(
             D3D12PipelineState::CBuffer &cb = spaces[regSpace].cbuffers[shaderReg];
             cb.Immediate = false;
             cb.RootElement = (uint32_t)rootEl;
+            cb.TableIndex = offset + i;
 
             if(desc)
             {
@@ -720,6 +721,7 @@ void D3D12Replay::FillRegisterSpaces(
             D3D12PipelineState::ResourceView &view = spaces[regSpace].srvs[shaderReg];
             view.Immediate = false;
             view.RootElement = (uint32_t)rootEl;
+            view.TableIndex = offset + i;
 
             if(desc)
             {
@@ -740,6 +742,7 @@ void D3D12Replay::FillRegisterSpaces(
             D3D12PipelineState::ResourceView &view = spaces[regSpace].uavs[shaderReg];
             view.Immediate = false;
             view.RootElement = (uint32_t)rootEl;
+            view.TableIndex = offset + i;
 
             if(desc)
             {
@@ -1141,9 +1144,19 @@ void D3D12Replay::RenderCheckerboard(Vec3f light, Vec3f dark)
   m_pDevice->GetDebugManager()->RenderCheckerboard(light, dark);
 }
 
+void D3D12Replay::RenderHighlightBox(float w, float h, float scale)
+{
+  m_pDevice->GetDebugManager()->RenderHighlightBox(w, h, scale);
+}
+
 bool D3D12Replay::RenderTexture(TextureDisplay cfg)
 {
   return m_pDevice->GetDebugManager()->RenderTexture(cfg, true);
+}
+
+bool D3D12Replay::IsTextureSupported(const ResourceFormat &format)
+{
+  return MakeDXGIFormat(format) != DXGI_FORMAT_UNKNOWN;
 }
 
 void D3D12Replay::GetBufferData(ResourceId buff, uint64_t offset, uint64_t len, vector<byte> &retData)
@@ -1156,160 +1169,6 @@ void D3D12Replay::PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_t
                             float pixel[4])
 {
   m_pDevice->GetDebugManager()->PickPixel(texture, x, y, sliceFace, mip, sample, typeHint, pixel);
-}
-
-uint64_t D3D12Replay::MakeOutputWindow(WindowingSystem system, void *data, bool depth)
-{
-  return m_pDevice->GetDebugManager()->MakeOutputWindow(system, data, depth);
-}
-
-void D3D12Replay::DestroyOutputWindow(uint64_t id)
-{
-  m_pDevice->GetDebugManager()->DestroyOutputWindow(id);
-}
-
-bool D3D12Replay::CheckResizeOutputWindow(uint64_t id)
-{
-  return m_pDevice->GetDebugManager()->CheckResizeOutputWindow(id);
-}
-
-void D3D12Replay::GetOutputWindowDimensions(uint64_t id, int32_t &w, int32_t &h)
-{
-  m_pDevice->GetDebugManager()->GetOutputWindowDimensions(id, w, h);
-}
-
-void D3D12Replay::ClearOutputWindowColour(uint64_t id, float col[4])
-{
-  m_pDevice->GetDebugManager()->ClearOutputWindowColour(id, col);
-}
-
-void D3D12Replay::ClearOutputWindowDepth(uint64_t id, float depth, uint8_t stencil)
-{
-  m_pDevice->GetDebugManager()->ClearOutputWindowDepth(id, depth, stencil);
-}
-
-void D3D12Replay::BindOutputWindow(uint64_t id, bool depth)
-{
-  m_pDevice->GetDebugManager()->BindOutputWindow(id, depth);
-}
-
-bool D3D12Replay::IsOutputWindowVisible(uint64_t id)
-{
-  return m_pDevice->GetDebugManager()->IsOutputWindowVisible(id);
-}
-
-void D3D12Replay::FlipOutputWindow(uint64_t id)
-{
-  m_pDevice->GetDebugManager()->FlipOutputWindow(id);
-}
-
-void D3D12Replay::ReplaceResource(ResourceId from, ResourceId to)
-{
-  m_pDevice->GetResourceManager()->ReplaceResource(from, to);
-}
-
-void D3D12Replay::RemoveReplacement(ResourceId id)
-{
-  m_pDevice->GetResourceManager()->RemoveReplacement(id);
-}
-
-void D3D12Replay::InitCallstackResolver()
-{
-  m_pDevice->GetSerialiser()->InitCallstackResolver();
-}
-
-bool D3D12Replay::HasCallstacks()
-{
-  return m_pDevice->GetSerialiser()->HasCallstacks();
-}
-
-Callstack::StackResolver *D3D12Replay::GetCallstackResolver()
-{
-  return m_pDevice->GetSerialiser()->GetCallstackResolver();
-}
-
-#pragma region not yet implemented
-
-vector<DebugMessage> D3D12Replay::GetDebugMessages()
-{
-  return vector<DebugMessage>();
-}
-
-vector<uint32_t> D3D12Replay::GetPassEvents(uint32_t eventID)
-{
-  vector<uint32_t> passEvents;
-
-  return passEvents;
-}
-
-void D3D12Replay::InitPostVSBuffers(uint32_t eventID)
-{
-}
-
-void D3D12Replay::InitPostVSBuffers(const vector<uint32_t> &passEvents)
-{
-}
-
-bool D3D12Replay::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t mip, uint32_t sample,
-                            FormatComponentType typeHint, float *minval, float *maxval)
-{
-  *minval = 0.0f;
-  *maxval = 1.0f;
-  return false;
-}
-
-bool D3D12Replay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t mip, uint32_t sample,
-                               FormatComponentType typeHint, float minval, float maxval,
-                               bool channels[4], vector<uint32_t> &histogram)
-{
-  histogram.resize(256, 0);
-  return false;
-}
-
-MeshFormat D3D12Replay::GetPostVSBuffers(uint32_t eventID, uint32_t instID, MeshDataStage stage)
-{
-  return MeshFormat();
-}
-
-byte *D3D12Replay::GetTextureData(ResourceId tex, uint32_t arrayIdx, uint32_t mip,
-                                  const GetTextureDataParams &params, size_t &dataSize)
-{
-  dataSize = 0;
-  return NULL;
-}
-
-vector<uint32_t> D3D12Replay::EnumerateCounters()
-{
-  return vector<uint32_t>();
-}
-
-void D3D12Replay::DescribeCounter(uint32_t counterID, CounterDescription &desc)
-{
-  desc = CounterDescription();
-}
-
-vector<CounterResult> D3D12Replay::FetchCounters(const vector<uint32_t> &counters)
-{
-  return vector<CounterResult>();
-}
-
-void D3D12Replay::RenderMesh(uint32_t eventID, const vector<MeshFormat> &secondaryDraws,
-                             const MeshDisplay &cfg)
-{
-}
-
-void D3D12Replay::BuildTargetShader(string source, string entry, const uint32_t compileFlags,
-                                    ShaderStageType type, ResourceId *id, string *errors)
-{
-}
-
-void D3D12Replay::BuildCustomShader(string source, string entry, const uint32_t compileFlags,
-                                    ShaderStageType type, ResourceId *id, string *errors)
-{
-}
-
-void D3D12Replay::RenderHighlightBox(float w, float h, float scale)
-{
 }
 
 void D3D12Replay::FillCBufferVariables(ResourceId shader, string entryPoint, uint32_t cbufSlot,
@@ -1395,6 +1254,156 @@ void D3D12Replay::FillCBufferVariables(ResourceId shader, string entryPoint, uin
   }
 }
 
+uint64_t D3D12Replay::MakeOutputWindow(WindowingSystem system, void *data, bool depth)
+{
+  return m_pDevice->GetDebugManager()->MakeOutputWindow(system, data, depth);
+}
+
+void D3D12Replay::DestroyOutputWindow(uint64_t id)
+{
+  m_pDevice->GetDebugManager()->DestroyOutputWindow(id);
+}
+
+bool D3D12Replay::CheckResizeOutputWindow(uint64_t id)
+{
+  return m_pDevice->GetDebugManager()->CheckResizeOutputWindow(id);
+}
+
+void D3D12Replay::GetOutputWindowDimensions(uint64_t id, int32_t &w, int32_t &h)
+{
+  m_pDevice->GetDebugManager()->GetOutputWindowDimensions(id, w, h);
+}
+
+void D3D12Replay::ClearOutputWindowColour(uint64_t id, float col[4])
+{
+  m_pDevice->GetDebugManager()->ClearOutputWindowColour(id, col);
+}
+
+void D3D12Replay::ClearOutputWindowDepth(uint64_t id, float depth, uint8_t stencil)
+{
+  m_pDevice->GetDebugManager()->ClearOutputWindowDepth(id, depth, stencil);
+}
+
+void D3D12Replay::BindOutputWindow(uint64_t id, bool depth)
+{
+  m_pDevice->GetDebugManager()->BindOutputWindow(id, depth);
+}
+
+bool D3D12Replay::IsOutputWindowVisible(uint64_t id)
+{
+  return m_pDevice->GetDebugManager()->IsOutputWindowVisible(id);
+}
+
+void D3D12Replay::FlipOutputWindow(uint64_t id)
+{
+  m_pDevice->GetDebugManager()->FlipOutputWindow(id);
+}
+
+void D3D12Replay::ReplaceResource(ResourceId from, ResourceId to)
+{
+  m_pDevice->GetResourceManager()->ReplaceResource(from, to);
+}
+
+void D3D12Replay::RemoveReplacement(ResourceId id)
+{
+  m_pDevice->GetResourceManager()->RemoveReplacement(id);
+}
+
+void D3D12Replay::InitCallstackResolver()
+{
+  m_pDevice->GetMainSerialiser()->InitCallstackResolver();
+}
+
+bool D3D12Replay::HasCallstacks()
+{
+  return m_pDevice->GetMainSerialiser()->HasCallstacks();
+}
+
+Callstack::StackResolver *D3D12Replay::GetCallstackResolver()
+{
+  return m_pDevice->GetMainSerialiser()->GetCallstackResolver();
+}
+
+#pragma region not yet implemented
+
+vector<DebugMessage> D3D12Replay::GetDebugMessages()
+{
+  return vector<DebugMessage>();
+}
+
+vector<uint32_t> D3D12Replay::GetPassEvents(uint32_t eventID)
+{
+  vector<uint32_t> passEvents;
+
+  return passEvents;
+}
+
+void D3D12Replay::InitPostVSBuffers(uint32_t eventID)
+{
+}
+
+void D3D12Replay::InitPostVSBuffers(const vector<uint32_t> &passEvents)
+{
+}
+
+bool D3D12Replay::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t mip, uint32_t sample,
+                            FormatComponentType typeHint, float *minval, float *maxval)
+{
+  *minval = 0.0f;
+  *maxval = 1.0f;
+  return false;
+}
+
+bool D3D12Replay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t mip, uint32_t sample,
+                               FormatComponentType typeHint, float minval, float maxval,
+                               bool channels[4], vector<uint32_t> &histogram)
+{
+  histogram.resize(256, 0);
+  return false;
+}
+
+MeshFormat D3D12Replay::GetPostVSBuffers(uint32_t eventID, uint32_t instID, MeshDataStage stage)
+{
+  return MeshFormat();
+}
+
+byte *D3D12Replay::GetTextureData(ResourceId tex, uint32_t arrayIdx, uint32_t mip,
+                                  const GetTextureDataParams &params, size_t &dataSize)
+{
+  dataSize = 0;
+  return NULL;
+}
+
+vector<uint32_t> D3D12Replay::EnumerateCounters()
+{
+  return vector<uint32_t>();
+}
+
+void D3D12Replay::DescribeCounter(uint32_t counterID, CounterDescription &desc)
+{
+  desc = CounterDescription();
+}
+
+vector<CounterResult> D3D12Replay::FetchCounters(const vector<uint32_t> &counters)
+{
+  return vector<CounterResult>();
+}
+
+void D3D12Replay::RenderMesh(uint32_t eventID, const vector<MeshFormat> &secondaryDraws,
+                             const MeshDisplay &cfg)
+{
+}
+
+void D3D12Replay::BuildTargetShader(string source, string entry, const uint32_t compileFlags,
+                                    ShaderStageType type, ResourceId *id, string *errors)
+{
+}
+
+void D3D12Replay::BuildCustomShader(string source, string entry, const uint32_t compileFlags,
+                                    ShaderStageType type, ResourceId *id, string *errors)
+{
+}
+
 vector<PixelModification> D3D12Replay::PixelHistory(vector<EventUsage> events, ResourceId target,
                                                     uint32_t x, uint32_t y, uint32_t slice,
                                                     uint32_t mip, uint32_t sampleIdx,
@@ -1452,11 +1461,6 @@ ResourceId D3D12Replay::CreateProxyTexture(const FetchTexture &templateTex)
 void D3D12Replay::SetProxyTextureData(ResourceId texid, uint32_t arrayIdx, uint32_t mip, byte *data,
                                       size_t dataSize)
 {
-}
-
-bool D3D12Replay::IsTextureSupported(const ResourceFormat &format)
-{
-  return MakeDXGIFormat(format) != DXGI_FORMAT_UNKNOWN;
 }
 
 ResourceId D3D12Replay::CreateProxyBuffer(const FetchBuffer &templateBuf)
@@ -1537,6 +1541,12 @@ ReplayCreateStatus D3D12_CreateReplayDevice(const char *logfile, IReplayDriver *
   if(logfile)
     wrappedDev->SetLogFile(logfile);
   wrappedDev->SetLogVersion(initParams.SerialiseVersion);
+
+  if(logfile && wrappedDev->GetMainSerialiser()->HasError())
+  {
+    SAFE_RELEASE(wrappedDev);
+    return eReplayCreate_FileIOFailed;
+  }
 
   RDCLOG("Created device.");
   D3D12Replay *replay = wrappedDev->GetReplay();

@@ -68,6 +68,8 @@ public:
   int GetHeight() { return m_height; }
   void RenderText(ID3D12GraphicsCommandList *list, float x, float y, const char *textfmt, ...);
 
+  void RenderHighlightBox(float w, float h, float scale);
+
   void RenderCheckerboard(Vec3f light, Vec3f dark);
   bool RenderTexture(TextureDisplay cfg, bool blendAlpha);
 
@@ -186,6 +188,8 @@ private:
   D3D12_CPU_DESCRIPTOR_HANDLE m_PickPixelRTV;
 
   ID3D12Resource *m_ReadbackBuffer;
+
+  ID3D12Resource *m_TexResource;
 
   static const uint64_t m_ReadbackSize = 16 * 1024 * 1024;
 

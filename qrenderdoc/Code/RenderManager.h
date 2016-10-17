@@ -1,8 +1,32 @@
-#ifndef RENDERMANAGER_H
-#define RENDERMANAGER_H
+/******************************************************************************
+ * The MIT License (MIT)
+ *
+ * Copyright (c) 2016 Baldur Karlsson
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ * THE SOFTWARE.
+ ******************************************************************************/
+
+#pragma once
 
 #include <QMutex>
 #include <QQueue>
+#include <QSemaphore>
 #include <QString>
 #include <QThread>
 #include <QWaitCondition>
@@ -12,6 +36,10 @@
 struct IReplayRenderer;
 class LambdaThread;
 
+// simple helper for the common case of 'we just need to run this on the render thread
+#define INVOKE_MEMFN(function) \
+  m_Ctx->Renderer()->AsyncInvoke([this](IReplayRenderer *r) { function(r); });
+
 class RenderManager
 {
 public:
@@ -20,7 +48,8 @@ public:
   RenderManager();
   ~RenderManager();
 
-  void Init(int proxyRenderer, QString replayHost, QString logfile, float *progress);
+  void OpenCapture(const QString &logfile, float *progress);
+  void DeleteCapture(const QString &logfile, bool local);
 
   bool IsRunning();
   ReplayCreateStatus GetCreateStatus() { return m_CreateStatus; }
@@ -35,12 +64,11 @@ private:
     InvokeHandle(InvokeMethod m)
     {
       method = m;
-      processed = false;
-      selfdelete = true;
+      selfdelete = false;
     }
 
     InvokeMethod method;
-    bool processed;
+    QSemaphore processed;
     bool selfdelete;
   };
 
@@ -61,5 +89,3 @@ private:
   LambdaThread *m_Thread;
   ReplayCreateStatus m_CreateStatus;
 };
-
-#endif    // RENDERMANAGER_H

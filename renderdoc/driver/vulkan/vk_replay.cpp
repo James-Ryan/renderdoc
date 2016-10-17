@@ -801,7 +801,6 @@ FetchTexture VulkanReplay::GetTexture(ResourceId id)
   ret.height = iminfo.extent.height;
   ret.depth = iminfo.extent.depth;
   ret.mips = iminfo.mipLevels;
-  ret.numSubresources = ret.mips * ret.arraysize;
 
   ret.byteSize = 0;
   for(uint32_t s = 0; s < ret.mips; s++)
@@ -809,7 +808,7 @@ FetchTexture VulkanReplay::GetTexture(ResourceId id)
   ret.byteSize *= ret.arraysize;
 
   ret.msQual = 0;
-  ret.msSamp = iminfo.samples;
+  ret.msSamp = RDCMAX(1U, (uint32_t)iminfo.samples);
 
   ret.format = MakeResourceFormat(iminfo.format);
 
@@ -987,7 +986,7 @@ void VulkanReplay::PickPixel(ResourceId texture, uint32_t x, uint32_t y, uint32_
           &clearval,
       };
 
-      RenderTextureInternal(texDisplay, rpbegin, true);
+      RenderTextureInternal(texDisplay, rpbegin, eTexDisplay_F32Render | eTexDisplay_MipShift);
     }
 
     VkDevice dev = m_pDriver->GetDev();
@@ -1110,12 +1109,15 @@ bool VulkanReplay::RenderTexture(TextureDisplay cfg)
       &clearval,
   };
 
-  return RenderTextureInternal(cfg, rpbegin, false);
+  return RenderTextureInternal(cfg, rpbegin, eTexDisplay_MipShift | eTexDisplay_BlendAlpha);
 }
 
-bool VulkanReplay::RenderTextureInternal(TextureDisplay cfg, VkRenderPassBeginInfo rpbegin,
-                                         bool f32render)
+bool VulkanReplay::RenderTextureInternal(TextureDisplay cfg, VkRenderPassBeginInfo rpbegin, int flags)
 {
+  const bool blendAlpha = (flags & eTexDisplay_BlendAlpha) != 0;
+  const bool mipShift = (flags & eTexDisplay_MipShift) != 0;
+  const bool f32render = (flags & eTexDisplay_F32Render) != 0;
+
   VkDevice dev = m_pDriver->GetDev();
   VkCommandBuffer cmd = m_pDriver->GetNextCmd();
   const VkLayerDispatchTable *vt = ObjDisp(dev);
@@ -1227,13 +1229,16 @@ bool VulkanReplay::RenderTextureInternal(TextureDisplay cfg, VkRenderPassBeginIn
   else
     data->Slice = (float)(cfg.sliceFace >> cfg.mip);
 
-  float mipScale = float(1 << cfg.mip);
+  data->TextureResolutionPS.x = float(RDCMAX(1, tex_x >> cfg.mip));
+  data->TextureResolutionPS.y = float(RDCMAX(1, tex_y >> cfg.mip));
+  data->TextureResolutionPS.z = float(RDCMAX(1, tex_z >> cfg.mip));
 
-  data->TextureResolutionPS.x = float(tex_x) / mipScale;
-  data->TextureResolutionPS.y = float(tex_y) / mipScale;
-  data->TextureResolutionPS.z = float(tex_z) / mipScale;
+  if(mipShift)
+    data->MipShift = float(1 << cfg.mip);
+  else
+    data->MipShift = 1.0f;
 
-  data->Scale = cfg.scale * mipScale;
+  data->Scale = cfg.scale;
 
   int sampleIdx = (int)RDCCLAMP(cfg.sampleIdx, 0U, (uint32_t)SampleCount(iminfo.samples));
 
@@ -1389,7 +1394,7 @@ bool VulkanReplay::RenderTextureInternal(TextureDisplay cfg, VkRenderPassBeginIn
     {
       pipe = GetDebugManager()->m_TexDisplayF32Pipeline;
     }
-    else if(!cfg.rawoutput && cfg.CustomShader == ResourceId())
+    else if(!cfg.rawoutput && blendAlpha && cfg.CustomShader == ResourceId())
     {
       pipe = GetDebugManager()->m_TexDisplayBlendPipeline;
     }
@@ -4136,7 +4141,10 @@ bool VulkanReplay::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t mip,
   data->HistogramTextureResolution.x = (float)RDCMAX(uint32_t(iminfo.extent.width) >> mip, 1U);
   data->HistogramTextureResolution.y = (float)RDCMAX(uint32_t(iminfo.extent.height) >> mip, 1U);
   data->HistogramTextureResolution.z = (float)RDCMAX(uint32_t(iminfo.arrayLayers) >> mip, 1U);
-  data->HistogramSlice = (float)sliceFace;
+  if(iminfo.type != VK_IMAGE_TYPE_3D)
+    data->HistogramSlice = (float)sliceFace + 0.001f;
+  else
+    data->HistogramSlice = (float)(sliceFace >> mip);
   data->HistogramMip = (int)mip;
   data->HistogramNumSamples = iminfo.samples;
   data->HistogramSample = (int)RDCCLAMP(sample, 0U, uint32_t(iminfo.samples) - 1);
@@ -4145,9 +4153,6 @@ bool VulkanReplay::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t mip,
   data->HistogramMin = 0.0f;
   data->HistogramMax = 1.0f;
   data->HistogramChannels = 0xf;
-
-  if(iminfo.type == VK_IMAGE_TYPE_3D)
-    data->HistogramSlice = float(sliceFace) / float(iminfo.extent.depth);
 
   GetDebugManager()->m_HistogramUBO.Unmap();
 
@@ -4381,7 +4386,10 @@ bool VulkanReplay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t m
   data->HistogramTextureResolution.x = (float)RDCMAX(uint32_t(iminfo.extent.width) >> mip, 1U);
   data->HistogramTextureResolution.y = (float)RDCMAX(uint32_t(iminfo.extent.height) >> mip, 1U);
   data->HistogramTextureResolution.z = (float)RDCMAX(uint32_t(iminfo.arrayLayers) >> mip, 1U);
-  data->HistogramSlice = (float)sliceFace;
+  if(iminfo.type != VK_IMAGE_TYPE_3D)
+    data->HistogramSlice = (float)sliceFace + 0.001f;
+  else
+    data->HistogramSlice = (float)(sliceFace >> mip);
   data->HistogramMip = (int)mip;
   data->HistogramNumSamples = iminfo.samples;
   data->HistogramSample = (int)RDCCLAMP(sample, 0U, uint32_t(iminfo.samples) - 1);
@@ -4406,9 +4414,6 @@ bool VulkanReplay::GetHistogram(ResourceId texid, uint32_t sliceFace, uint32_t m
 
   data->HistogramChannels = chans;
   data->HistogramFlags = 0;
-
-  if(iminfo.type == VK_IMAGE_TYPE_3D)
-    data->HistogramSlice = float(sliceFace) / float(iminfo.extent.depth);
 
   GetDebugManager()->m_HistogramUBO.Unmap();
 
@@ -4816,7 +4821,7 @@ byte *VulkanReplay::GetTextureData(ResourceId tex, uint32_t arrayIdx, uint32_t m
           &clearval,
       };
 
-      RenderTextureInternal(texDisplay, rpbegin, false);
+      RenderTextureInternal(texDisplay, rpbegin, 0);
     }
 
     m_DebugWidth = oldW;
@@ -5438,7 +5443,7 @@ ResourceId VulkanReplay::ApplyCustomShader(ResourceId shader, ResourceId texid, 
       &clearval,
   };
 
-  RenderTextureInternal(disp, rpbegin, false);
+  RenderTextureInternal(disp, rpbegin, eTexDisplay_MipShift);
 
   m_DebugWidth = oldW;
   m_DebugHeight = oldH;

@@ -49,12 +49,15 @@ struct FunctionHook
   }
 
   bool operator<(const FunctionHook &h) { return function < h.function; }
-  bool ApplyHook(void **IATentry)
+  bool ApplyHook(void **IATentry, bool &already)
   {
     DWORD oldProtection = PAGE_EXECUTE;
 
     if(*IATentry == hookptr)
-      return false;
+    {
+      already = true;
+      return true;
+    }
 
     {
       SCOPED_LOCK(installedLock);
@@ -294,9 +297,13 @@ struct CachedHookData
                      !strcmp(found->function.c_str(), importName) && found->excludeModule != module)
                   {
                     SCOPED_LOCK(lock);
-                    bool applied = found->ApplyHook(IATentry);
+                    bool already = false;
+                    bool applied = found->ApplyHook(IATentry, already);
 
-                    if(!applied)
+                    // if we failed, or if it's already set and we're not doing a missedOrdinals
+                    // second pass, then just bail out immediately as we've already hooked this
+                    // module and there's no point wasting time re-hooking nothing
+                    if(!applied || (already && !missedOrdinals))
                     {
                       FreeLibrary(refcountModHandle);
                       return;
@@ -338,9 +345,13 @@ struct CachedHookData
              !strcmp(found->function.c_str(), importName) && found->excludeModule != module)
           {
             SCOPED_LOCK(lock);
-            bool applied = found->ApplyHook(IATentry);
+            bool already = false;
+            bool applied = found->ApplyHook(IATentry, already);
 
-            if(!applied)
+            // if we failed, or if it's already set and we're not doing a missedOrdinals
+            // second pass, then just bail out immediately as we've already hooked this
+            // module and there's no point wasting time re-hooking nothing
+            if(!applied || (already && !missedOrdinals))
             {
               FreeLibrary(refcountModHandle);
               return;
@@ -428,12 +439,18 @@ HMODULE WINAPI Hooked_LoadLibraryExA(LPCSTR lpLibFileName, HANDLE fileHandle, DW
   if(flags == 0 && GetModuleHandleA(lpLibFileName))
     dohook = false;
 
+  SetLastError(S_OK);
+
   // we can use the function naked, as when setting up the hook for LoadLibraryExA, our own module
   // was excluded from IAT patching
   HMODULE mod = LoadLibraryExA(lpLibFileName, fileHandle, flags);
 
+  DWORD err = GetLastError();
+
   if(dohook)
     HookAllModules();
+
+  SetLastError(err);
 
   return mod;
 }
@@ -444,12 +461,18 @@ HMODULE WINAPI Hooked_LoadLibraryExW(LPCWSTR lpLibFileName, HANDLE fileHandle, D
   if(flags == 0 && GetModuleHandleW(lpLibFileName))
     dohook = false;
 
+  SetLastError(S_OK);
+
   // we can use the function naked, as when setting up the hook for LoadLibraryExA, our own module
   // was excluded from IAT patching
   HMODULE mod = LoadLibraryExW(lpLibFileName, fileHandle, flags);
 
+  DWORD err = GetLastError();
+
   if(dohook)
     HookAllModules();
+
+  SetLastError(err);
 
   return mod;
 }
@@ -492,6 +515,8 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, LPCSTR func)
         {
           RDCERR("Unexpected ordinal - lower than ordinalbase %u for %s",
                  (uint32_t)it->second.OrdinalBase, it->first.c_str());
+
+          SetLastError(S_OK);
           return GetProcAddress(mod, func);
         }
 
@@ -501,6 +526,8 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, LPCSTR func)
         {
           RDCERR("Unexpected ordinal - higher than fetched ordinal names (%u) for %s",
                  (uint32_t)it->second.OrdinalNames.size(), it->first.c_str());
+
+          SetLastError(S_OK);
           return GetProcAddress(mod, func);
         }
 
@@ -516,6 +543,8 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, LPCSTR func)
         if(found->origptr && *found->origptr == NULL)
           *found->origptr = (void *)GetProcAddress(mod, func);
 
+        SetLastError(S_OK);
+
         if(found->origptr && *found->origptr == NULL)
           return NULL;
 
@@ -523,6 +552,8 @@ FARPROC WINAPI Hooked_GetProcAddress(HMODULE mod, LPCSTR func)
       }
     }
   }
+
+  SetLastError(S_OK);
 
   return GetProcAddress(mod, func);
 }
@@ -564,11 +595,9 @@ void Win32_IAT_EndHooks()
   {
     // we need to do a second pass now that we know ordinal names to finally hook
     // some imports by ordinal only.
-    s_HookData->missedOrdinals = false;
-
     HookAllModules();
 
-    RDCASSERT(!s_HookData->missedOrdinals);
+    s_HookData->missedOrdinals = false;
   }
 }
 

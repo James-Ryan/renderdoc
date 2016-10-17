@@ -2448,6 +2448,9 @@ uint32_t D3D11DebugManager::PickVertex(uint32_t eventID, const MeshDisplay &cfg,
 
     RDCASSERT(cfg.position.idxoffs < 0xffffffff);
 
+    D3D11_BUFFER_DESC ibdesc;
+    ib->GetDesc(&ibdesc);
+
     D3D11_BOX box;
     box.front = 0;
     box.back = 1;
@@ -2455,6 +2458,8 @@ uint32_t D3D11DebugManager::PickVertex(uint32_t eventID, const MeshDisplay &cfg,
     box.right = (uint32_t)cfg.position.idxoffs + cfg.position.numVerts * cfg.position.idxByteWidth;
     box.top = 0;
     box.bottom = 1;
+
+    box.right = RDCMIN(box.right, ibdesc.ByteWidth - (uint32_t)cfg.position.idxoffs);
 
     m_pImmediateContext->CopySubresourceRegion(m_DebugRender.PickIBBuf, 0, 0, 0, 0, ib, 0, &box);
   }
@@ -2881,8 +2886,9 @@ byte *D3D11DebugManager::GetTextureData(ResourceId tex, uint32_t arrayIdx, uint3
     {
       RDCASSERT(params.remap == eRemap_RGBA8);
 
-      desc.Format =
-          IsSRGBFormat(desc.Format) ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB : DXGI_FORMAT_R8G8B8A8_UNORM;
+      desc.Format = (IsSRGBFormat(desc.Format) || wrapTex->m_RealDescriptor)
+                        ? DXGI_FORMAT_R8G8B8A8_UNORM_SRGB
+                        : DXGI_FORMAT_R8G8B8A8_UNORM;
       desc.ArraySize = 1;
     }
 

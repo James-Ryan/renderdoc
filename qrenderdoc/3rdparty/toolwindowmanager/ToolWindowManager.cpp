@@ -66,6 +66,7 @@ ToolWindowManager::ToolWindowManager(QWidget *parent) :
   m_dropSuggestionSwitchTimer.setInterval(1000);
   m_dropCurrentSuggestionIndex = 0;
   m_allowFloatingWindow = true;
+  m_createCallback = NULL;
 
   m_rectRubberBand = new QRubberBand(QRubberBand::Rectangle, this);
   m_lineRubberBand = new QRubberBand(QRubberBand::Line, this);
@@ -271,6 +272,21 @@ void ToolWindowManager::removeToolWindow(QWidget *toolWindow) {
   m_toolWindowProperties.remove(toolWindow);
 }
 
+QWidget* ToolWindowManager::createToolWindow(const QString& objectName)
+{
+  if (m_createCallback) {
+    QWidget *toolWindow = m_createCallback(objectName);
+    if(toolWindow) {
+      m_toolWindows << toolWindow;
+      m_toolWindowProperties[toolWindow] = ToolWindowProperty(0);
+      QObject::connect(toolWindow, &QWidget::windowTitleChanged, this, &ToolWindowManager::windowTitleChanged);
+      return toolWindow;
+    }
+  }
+
+  return NULL;
+}
+
 void ToolWindowManager::setSuggestionSwitchInterval(int msec) {
   m_dropSuggestionSwitchTimer.setInterval(msec);
 }
@@ -291,13 +307,13 @@ void ToolWindowManager::setAllowFloatingWindow(bool allow) {
   m_allowFloatingWindow = allow;
 }
 
-QVariant ToolWindowManager::saveState() {
+QVariantMap ToolWindowManager::saveState() {
   QVariantMap result;
   result["toolWindowManagerStateFormat"] = 1;
   ToolWindowManagerWrapper* mainWrapper = findChild<ToolWindowManagerWrapper*>();
   if (!mainWrapper) {
     qWarning("can't find main wrapper");
-    return QVariant();
+    return QVariantMap();
   }
   result["mainWrapper"] = mainWrapper->saveState();
   QVariantList floatingWindowsData;
@@ -309,9 +325,8 @@ QVariant ToolWindowManager::saveState() {
   return result;
 }
 
-void ToolWindowManager::restoreState(const QVariant &data) {
-  if (!data.isValid()) { return; }
-  QVariantMap dataMap = data.toMap();
+void ToolWindowManager::restoreState(const QVariantMap &dataMap) {
+  if (dataMap.isEmpty()) { return; }
   if (dataMap["toolWindowManagerStateFormat"].toInt() != 1) {
     qWarning("state format is not recognized");
     return;
@@ -327,6 +342,11 @@ void ToolWindowManager::restoreState(const QVariant &data) {
     ToolWindowManagerWrapper* wrapper = new ToolWindowManagerWrapper(this);
     wrapper->restoreState(windowData.toMap());
     wrapper->show();
+    if(wrapper->windowState() && Qt::WindowMaximized)
+    {
+      wrapper->setWindowState(0);
+      wrapper->setWindowState(Qt::WindowMaximized);
+    }
   }
   simplifyLayout();
   foreach(QWidget* toolWindow, m_toolWindows) {
@@ -443,7 +463,7 @@ void ToolWindowManager::startDrag(const QList<QWidget *> &toolWindows) {
 
 QVariantMap ToolWindowManager::saveSplitterState(QSplitter *splitter) {
   QVariantMap result;
-  result["state"] = splitter->saveState();
+  result["state"] = splitter->saveState().toBase64();
   result["type"] = "splitter";
   QVariantList items;
   for(int i = 0; i < splitter->count(); i++) {
@@ -485,7 +505,7 @@ QSplitter *ToolWindowManager::restoreSplitterState(const QVariantMap &data) {
       qWarning("unknown item type");
     }
   }
-  splitter->restoreState(data["state"].toByteArray());
+  splitter->restoreState(QByteArray::fromBase64(data["state"].toByteArray()));
   return splitter;
 }
 
@@ -636,7 +656,7 @@ void ToolWindowManager::findSuggestions(ToolWindowManagerWrapper* wrapper) {
         m_suggestions << AreaReference(side, widget);
       }
     }
-    if (area && area->rect().contains(area->mapFromGlobal(globalPos))) {
+    if (area && area->allowUserDrop() && area->rect().contains(area->mapFromGlobal(globalPos))) {
       m_suggestions << AreaReference(AddTo, area);
     }
   }

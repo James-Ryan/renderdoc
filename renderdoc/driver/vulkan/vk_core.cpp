@@ -269,13 +269,9 @@ WrappedVulkan::WrappedVulkan(const char *logFilename) : m_RenderState(&m_Creatio
 
   m_AppControlledCapture = false;
 
-  m_FrameTimer.Restart();
-
   threadSerialiserTLSSlot = Threading::AllocateTLSSlot();
   tempMemoryTLSSlot = Threading::AllocateTLSSlot();
   debugMessageSinkTLSSlot = Threading::AllocateTLSSlot();
-
-  m_TotalTime = m_AvgFrametime = m_MinFrametime = m_MaxFrametime = 0.0;
 
   m_RootEventID = 1;
   m_RootDrawcallID = 1;
@@ -802,9 +798,8 @@ VkResult WrappedVulkan::GetProvidedExtensionProperties(uint32_t *pPropertyCount,
 void WrappedVulkan::Serialise_CaptureScope(uint64_t offset)
 {
   uint32_t FrameNumber = m_FrameCounter;
-  GetMainSerialiser()->Serialise(
-      "FrameNumber",
-      FrameNumber);    // must use main serialiser here to match resource manager below
+  // must use main serialiser here to match resource manager below
+  GetMainSerialiser()->Serialise("FrameNumber", FrameNumber);
 
   if(m_State >= WRITING)
   {
@@ -1384,7 +1379,7 @@ bool WrappedVulkan::EndFrameCapture(void *dev, void *wnd)
 
   m_pFileSerialiser->FlushToDisk();
 
-  RenderDoc::Inst().SuccessfullyWrittenLog();
+  RenderDoc::Inst().SuccessfullyWrittenLog(m_FrameCounter);
 
   SAFE_DELETE(m_pFileSerialiser);
   SAFE_DELETE(m_HeaderChunk);

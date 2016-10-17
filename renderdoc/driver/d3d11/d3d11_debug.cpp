@@ -1474,10 +1474,18 @@ bool D3D11DebugManager::InitFontRendering()
 
 void D3D11DebugManager::SetOutputWindow(HWND w)
 {
-  RECT rect;
+  RECT rect = {0, 0, 0, 0};
   GetClientRect(w, &rect);
-  m_supersamplingX = float(m_width) / float(rect.right - rect.left);
-  m_supersamplingY = float(m_height) / float(rect.bottom - rect.top);
+  if(rect.right == rect.left || rect.bottom == rect.top)
+  {
+    m_supersamplingX = 1.0f;
+    m_supersamplingY = 1.0f;
+  }
+  else
+  {
+    m_supersamplingX = float(m_width) / float(rect.right - rect.left);
+    m_supersamplingY = float(m_height) / float(rect.bottom - rect.top);
+  }
 }
 
 void D3D11DebugManager::OutputWindow::MakeRTV()
@@ -1796,7 +1804,7 @@ bool D3D11DebugManager::GetHistogram(ResourceId texid, uint32_t sliceFace, uint3
   }
 
   if(details.texType == eTexType_3D)
-    cdata.HistogramSlice = float(sliceFace) / float(details.texDepth);
+    cdata.HistogramSlice = float(sliceFace) / float(details.texDepth) + 0.001f;
 
   ID3D11Buffer *cbuf = MakeCBuffer(&cdata, sizeof(cdata));
 
@@ -1897,7 +1905,7 @@ bool D3D11DebugManager::GetMinMax(ResourceId texid, uint32_t sliceFace, uint32_t
   }
 
   if(details.texType == eTexType_3D)
-    cdata.HistogramSlice = float(sliceFace) / float(details.texDepth);
+    cdata.HistogramSlice = float(sliceFace) / float(details.texDepth) + 0.001f;
 
   ID3D11Buffer *cbuf = MakeCBuffer(&cdata, sizeof(cdata));
 

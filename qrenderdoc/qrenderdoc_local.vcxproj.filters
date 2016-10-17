@@ -1,11 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
-    <Filter Include="Form Files">
-      <UniqueIdentifier>{99349809-55BA-4b9d-BF79-8FDBB0286EB3}</UniqueIdentifier>
-      <Extensions>ui</Extensions>
-      <ParseFiles>false</ParseFiles>
-    </Filter>
     <Filter Include="Generated Files">
       <UniqueIdentifier>{71ED8ED8-ACB9-4CE9-BBE1-E00B30144E11}</UniqueIdentifier>
       <Extensions>cpp;c;cxx;moc;h;def;odl;idl;res;</Extensions>
@@ -13,24 +8,6 @@
     <Filter Include="Generated Files">
       <UniqueIdentifier>{71ED8ED8-ACB9-4CE9-BBE1-E00B30144E11}</UniqueIdentifier>
       <Extensions>cpp;c;cxx;moc;h;def;odl;idl;res;</Extensions>
-    </Filter>
-    <Filter Include="Header Files">
-      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
-      <Extensions>h;hpp;hxx;hm;inl;inc;xsd</Extensions>
-    </Filter>
-    <Filter Include="Resource Files">
-      <UniqueIdentifier>{D9D6E242-F8AF-46E4-B9FD-80ECBC20BA3E}</UniqueIdentifier>
-      <Extensions>qrc;*</Extensions>
-      <ParseFiles>false</ParseFiles>
-    </Filter>
-    <Filter Include="Source Files">
-      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
-      <Extensions>cpp;c;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
-    </Filter>
-    <Filter Include="Forms">
-      <UniqueIdentifier>{99349809-55BA-4b9d-BF79-8FDBB0286EB3}</UniqueIdentifier>
-      <Extensions>ui</Extensions>
-      <ParseFiles>false</ParseFiles>
     </Filter>
     <Filter Include="Resources">
       <UniqueIdentifier>{D9D6E242-F8AF-46E4-B9FD-80ECBC20BA3E}</UniqueIdentifier>
@@ -61,12 +38,15 @@
     <Filter Include="Widgets">
       <UniqueIdentifier>{633cf7bf-24ec-4927-835b-f6e96e21c288}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Widgets\Extended">
+      <UniqueIdentifier>{42a491e9-4e18-4220-8de2-e07b7cde26bc}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="generated\moc_EventBrowser.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
-    <ClCompile Include="generated\moc_LineEditFocusWidget.cpp">
+    <ClCompile Include="generated\moc_RDLineEdit.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
     <ClCompile Include="generated\moc_MainWindow.cpp">
@@ -90,9 +70,6 @@
     <ClCompile Include="generated\moc_AboutDialog.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
-    <ClCompile Include="generated\moc_Core.cpp">
-      <Filter>Generated Files</Filter>
-    </ClCompile>
     <ClCompile Include="generated\moc_CustomPaintWidget.cpp">
       <Filter>Generated Files</Filter>
     </ClCompile>
@@ -108,14 +85,8 @@
     <ClCompile Include="3rdparty\flowlayout\FlowLayout.cpp">
       <Filter>3rdparty\FlowLayout</Filter>
     </ClCompile>
-    <ClCompile Include="Code\Core.cpp">
+    <ClCompile Include="Code\qrenderdoc.cpp">
       <Filter>Code</Filter>
-    </ClCompile>
-    <ClCompile Include="Code\main.cpp">
-      <Filter>Code</Filter>
-    </ClCompile>
-    <ClCompile Include="Windows\AboutDialog.cpp">
-      <Filter>Windows\Dialogs</Filter>
     </ClCompile>
     <ClCompile Include="Widgets\CustomPaintWidget.cpp">
       <Filter>Widgets</Filter>
@@ -129,11 +100,74 @@
     <ClCompile Include="Windows\EventBrowser.cpp">
       <Filter>Windows</Filter>
     </ClCompile>
-    <ClCompile Include="Widgets\LineEditFocusWidget.cpp">
-      <Filter>Widgets</Filter>
-    </ClCompile>
     <ClCompile Include="Code\RenderManager.cpp">
       <Filter>Code</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\ResourcePreview.cpp">
+      <Filter>Widgets</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_ResourcePreview.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_RDLabel.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\ThumbnailStrip.cpp">
+      <Filter>Widgets</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_ThumbnailStrip.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Code\CaptureContext.cpp">
+      <Filter>Code</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_CaptureContext.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Code\CommonPipelineState.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Code\PersistantConfig.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\TextureGoto.cpp">
+      <Filter>Widgets</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_TextureGoto.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_RDDoubleSpinBox.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_RDListView.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\RangeHistogram.cpp">
+      <Filter>Widgets</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_RangeHistogram.cpp">
+      <Filter>Generated Files</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\Extended\RDDoubleSpinBox.cpp">
+      <Filter>Widgets\Extended</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\Extended\RDLabel.cpp">
+      <Filter>Widgets\Extended</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\Extended\RDLineEdit.cpp">
+      <Filter>Widgets\Extended</Filter>
+    </ClCompile>
+    <ClCompile Include="Widgets\Extended\RDListView.cpp">
+      <Filter>Widgets\Extended</Filter>
+    </ClCompile>
+    <ClCompile Include="Windows\Dialogs\AboutDialog.cpp">
+      <Filter>Windows\Dialogs</Filter>
+    </ClCompile>
+    <ClCompile Include="Windows\Dialogs\TextureSaveDialog.cpp">
+      <Filter>Windows\Dialogs</Filter>
+    </ClCompile>
+    <ClCompile Include="generated\moc_TextureSaveDialog.cpp">
+      <Filter>Generated Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>
@@ -143,20 +177,11 @@
     <ClInclude Include="Code\RenderManager.h">
       <Filter>Code</Filter>
     </ClInclude>
-    <ClInclude Include="Windows\AboutDialog.h">
-      <Filter>Windows\Dialogs</Filter>
-    </ClInclude>
-    <ClInclude Include="Code\Core.h">
-      <Filter>Code</Filter>
-    </ClInclude>
     <ClInclude Include="Widgets\CustomPaintWidget.h">
       <Filter>Widgets</Filter>
     </ClInclude>
     <ClInclude Include="Windows\EventBrowser.h">
       <Filter>Windows</Filter>
-    </ClInclude>
-    <ClInclude Include="Widgets\LineEditFocusWidget.h">
-      <Filter>Widgets</Filter>
     </ClInclude>
     <ClInclude Include="Windows\MainWindow.h">
       <Filter>Windows</Filter>
@@ -172,6 +197,54 @@
     </ClInclude>
     <ClInclude Include="3rdparty\toolwindowmanager\ToolWindowManagerWrapper.h">
       <Filter>3rdparty\ToolWindowManager</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\ResourcePreview.h">
+      <Filter>Widgets</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\ThumbnailStrip.h">
+      <Filter>Widgets</Filter>
+    </ClInclude>
+    <ClInclude Include="generated\ui_ResourcePreview.h">
+      <Filter>Generated Files</Filter>
+    </ClInclude>
+    <ClInclude Include="generated\ui_ThumbnailStrip.h">
+      <Filter>Generated Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Code\CaptureContext.h">
+      <Filter>Code</Filter>
+    </ClInclude>
+    <ClInclude Include="Code\CommonPipelineState.h">
+      <Filter>Code</Filter>
+    </ClInclude>
+    <ClInclude Include="Code\PersistantConfig.h">
+      <Filter>Generated Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\TextureGoto.h">
+      <Filter>Widgets</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\RangeHistogram.h">
+      <Filter>Widgets</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\Extended\RDDoubleSpinBox.h">
+      <Filter>Widgets\Extended</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\Extended\RDLabel.h">
+      <Filter>Widgets\Extended</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\Extended\RDLineEdit.h">
+      <Filter>Widgets\Extended</Filter>
+    </ClInclude>
+    <ClInclude Include="Widgets\Extended\RDListView.h">
+      <Filter>Widgets\Extended</Filter>
+    </ClInclude>
+    <ClInclude Include="Windows\Dialogs\AboutDialog.h">
+      <Filter>Windows\Dialogs</Filter>
+    </ClInclude>
+    <ClInclude Include="Windows\Dialogs\TextureSaveDialog.h">
+      <Filter>Windows\Dialogs</Filter>
+    </ClInclude>
+    <ClInclude Include="generated\ui_TextureSaveDialog.h">
+      <Filter>Generated Files</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -352,9 +425,6 @@
     <None Include="Resources\zoom.png">
       <Filter>Resources\Files</Filter>
     </None>
-    <None Include="Windows\AboutDialog.ui">
-      <Filter>Windows\Dialogs</Filter>
-    </None>
     <None Include="Windows\EventBrowser.ui">
       <Filter>Windows</Filter>
     </None>
@@ -368,6 +438,18 @@
     <None Include="3rdparty\Qt\bin32\Qt5Core.dll" />
     <None Include="3rdparty\Qt\bin32\Qt5Gui.dll" />
     <None Include="3rdparty\Qt\bin32\Qt5Widgets.dll" />
+    <None Include="Widgets\ResourcePreview.ui">
+      <Filter>Widgets</Filter>
+    </None>
+    <None Include="Widgets\ThumbnailStrip.ui">
+      <Filter>Widgets</Filter>
+    </None>
+    <None Include="Windows\Dialogs\AboutDialog.ui">
+      <Filter>Windows\Dialogs</Filter>
+    </None>
+    <None Include="Windows\Dialogs\TextureSaveDialog.ui">
+      <Filter>Windows\Dialogs</Filter>
+    </None>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="generated\ui_AboutDialog.h">

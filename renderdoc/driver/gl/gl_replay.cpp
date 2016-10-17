@@ -421,6 +421,18 @@ bool GLReplay::IsRenderOutput(ResourceId id)
   return false;
 }
 
+FetchTexture GLReplay::GetTexture(ResourceId id)
+{
+  auto it = m_CachedTextures.find(id);
+  if(it == m_CachedTextures.end())
+  {
+    CacheTexture(id);
+    return m_CachedTextures[id];
+  }
+
+  return it->second;
+}
+
 void GLReplay::CacheTexture(ResourceId id)
 {
   FetchTexture tex;
@@ -446,7 +458,6 @@ void GLReplay::CacheTexture(ResourceId id)
     tex.cubemap = false;
     tex.mips = 1;
     tex.arraysize = 1;
-    tex.numSubresources = 1;
     tex.creationFlags = 0;
     tex.msQual = 0;
     tex.msSamp = 1;
@@ -466,10 +477,9 @@ void GLReplay::CacheTexture(ResourceId id)
     tex.cubemap = false;
     tex.mips = 1;
     tex.arraysize = 1;
-    tex.numSubresources = 1;
     tex.creationFlags = eTextureCreate_RTV;
     tex.msQual = 0;
-    tex.msSamp = res.samples;
+    tex.msSamp = RDCMAX(1, res.samples);
 
     tex.format = MakeResourceFormat(gl, eGL_TEXTURE_2D, res.internalFormat);
 
@@ -594,7 +604,7 @@ void GLReplay::CacheTexture(ResourceId id)
       tex.depth = 1;
       tex.arraysize = (target == eGL_TEXTURE_CUBE_MAP ? 6 : 1);
       tex.cubemap = (target == eGL_TEXTURE_CUBE_MAP);
-      tex.msSamp = (target == eGL_TEXTURE_2D_MULTISAMPLE ? samples : 1);
+      tex.msSamp = RDCMAX(1, target == eGL_TEXTURE_2D_MULTISAMPLE ? samples : 1);
       break;
     case eGL_TEXTURE_2D_ARRAY:
     case eGL_TEXTURE_2D_MULTISAMPLE_ARRAY:
@@ -605,7 +615,7 @@ void GLReplay::CacheTexture(ResourceId id)
       tex.depth = 1;
       tex.arraysize = depth;
       tex.cubemap = (target == eGL_TEXTURE_CUBE_MAP_ARRAY);
-      tex.msSamp = (target == eGL_TEXTURE_2D_MULTISAMPLE_ARRAY ? samples : 1);
+      tex.msSamp = RDCMAX(1, target == eGL_TEXTURE_2D_MULTISAMPLE_ARRAY ? samples : 1);
       break;
     case eGL_TEXTURE_3D:
       tex.dimension = 3;
@@ -677,9 +687,9 @@ void GLReplay::CacheTexture(ResourceId id)
     tex.cubemap = false;
     tex.mips = 1;
     tex.arraysize = 1;
-    tex.numSubresources = 1;
     tex.creationFlags = eTextureCreate_SRV;
-    tex.msQual = tex.msSamp = 0;
+    tex.msQual = 0;
+    tex.msSamp = 1;
     tex.byteSize = 0;
 
     gl.glGetTextureLevelParameterivEXT(res.resource.name, levelQueryType, 0,
@@ -691,8 +701,6 @@ void GLReplay::CacheTexture(ResourceId id)
   }
 
   tex.mips = GetNumMips(gl.m_Real, target, res.resource.name, tex.width, tex.height, tex.depth);
-
-  tex.numSubresources = tex.mips * tex.arraysize;
 
   GLint compressed;
   gl.glGetTextureLevelParameterivEXT(res.resource.name, levelQueryType, 0, eGL_TEXTURE_COMPRESSED,
@@ -2292,7 +2300,7 @@ byte *GLReplay::GetTextureData(ResourceId tex, uint32_t arrayIdx, uint32_t mip,
 
       gl.glViewport(0, 0, width, height);
 
-      RenderTextureInternal(texDisplay, false);
+      RenderTextureInternal(texDisplay, 0);
     }
 
     DebugData.outWidth = oldW;
@@ -2306,6 +2314,7 @@ byte *GLReplay::GetTextureData(ResourceId tex, uint32_t arrayIdx, uint32_t mip,
       depth = 1;
     arraysize = 1;
     samples = 1;
+    mip = 0;
 
     gl.glDeleteFramebuffers(1, &fbo);
   }
@@ -2612,7 +2621,7 @@ ResourceId GLReplay::ApplyCustomShader(ResourceId shader, ResourceId texid, uint
   disp.scale = 1.0f;
   disp.sliceFace = arrayIdx;
 
-  RenderTextureInternal(disp, false);
+  RenderTextureInternal(disp, eTexDisplay_MipShift);
 
   return DebugData.CustomShaderTexID;
 }
