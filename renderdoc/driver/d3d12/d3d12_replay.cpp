@@ -123,9 +123,24 @@ FetchBuffer D3D12Replay::GetBuffer(ResourceId id)
 
   ret.length = desc.Width;
 
-  D3D12NOTIMP("Buffer creation flags from implicit usage");
+  ret.creationFlags = 0;
 
-  ret.creationFlags = eBufferCreate_VB | eBufferCreate_IB | eBufferCreate_CB | eBufferCreate_Indirect;
+  const std::vector<EventUsage> &usage = m_pDevice->GetQueue()->GetUsage(id);
+
+  for(size_t i = 0; i < usage.size(); i++)
+  {
+    if(usage[i].usage == eUsage_VS_RWResource || usage[i].usage == eUsage_HS_RWResource ||
+       usage[i].usage == eUsage_DS_RWResource || usage[i].usage == eUsage_GS_RWResource ||
+       usage[i].usage == eUsage_PS_RWResource || usage[i].usage == eUsage_CS_RWResource)
+      ret.creationFlags |= eBufferCreate_UAV;
+    else if(usage[i].usage == eUsage_VertexBuffer)
+      ret.creationFlags |= eBufferCreate_VB;
+    else if(usage[i].usage == eUsage_IndexBuffer)
+      ret.creationFlags |= eBufferCreate_IB;
+    else if(usage[i].usage == eUsage_Indirect)
+      ret.creationFlags |= eBufferCreate_Indirect;
+  }
+
   if(desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
     ret.creationFlags |= eBufferCreate_UAV;
 
@@ -170,8 +185,7 @@ FetchTexture D3D12Replay::GetTexture(ResourceId id)
     case 3: ret.resType = eResType_Texture3D; break;
   }
 
-  D3D12NOTIMP("Texture cubemap-ness from implicit usage");
-  ret.cubemap = false;    // eResType_TextureCube, eResType_TextureCubeArray
+  ret.cubemap = m_pDevice->IsCubemap(id);
 
   ret.creationFlags = eTextureCreate_SRV;
 
@@ -1033,9 +1047,7 @@ void D3D12Replay::MakePipelineState()
 
       if(h.heap != ResourceId())
       {
-        WrappedID3D12DescriptorHeap *heap = rm->GetLiveAs<WrappedID3D12DescriptorHeap>(h.heap);
-        D3D12Descriptor *desc =
-            (D3D12Descriptor *)heap->GetCPUDescriptorHandleForHeapStart().ptr + h.index;
+        D3D12Descriptor *desc = DescriptorFromPortableHandle(rm, h);
 
         if(rs.rtSingle)
           desc += i;
@@ -1052,9 +1064,7 @@ void D3D12Replay::MakePipelineState()
 
       if(rs.dsv.heap != ResourceId())
       {
-        WrappedID3D12DescriptorHeap *heap = rm->GetLiveAs<WrappedID3D12DescriptorHeap>(rs.dsv.heap);
-        D3D12Descriptor *desc =
-            (D3D12Descriptor *)heap->GetCPUDescriptorHandleForHeapStart().ptr + rs.dsv.index;
+        D3D12Descriptor *desc = DescriptorFromPortableHandle(rm, rs.dsv);
 
         view.RootElement = 0;
         view.Immediate = false;
@@ -1324,12 +1334,12 @@ Callstack::StackResolver *D3D12Replay::GetCallstackResolver()
   return m_pDevice->GetMainSerialiser()->GetCallstackResolver();
 }
 
-#pragma region not yet implemented
-
 vector<DebugMessage> D3D12Replay::GetDebugMessages()
 {
-  return vector<DebugMessage>();
+  return m_pDevice->GetDebugMessages();
 }
+
+#pragma region not yet implemented
 
 vector<uint32_t> D3D12Replay::GetPassEvents(uint32_t eventID)
 {

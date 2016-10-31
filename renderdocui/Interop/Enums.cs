@@ -400,6 +400,7 @@ namespace renderdoc
     	GS_Constants,
     	PS_Constants,
     	CS_Constants,
+        All_Constants,
 
     	SO,
 
@@ -409,6 +410,7 @@ namespace renderdoc
     	GS_Resource,
     	PS_Resource,
     	CS_Resource,
+        All_Resource,
 
         VS_RWResource,
         HS_RWResource,
@@ -416,10 +418,13 @@ namespace renderdoc
         GS_RWResource,
         PS_RWResource,
         CS_RWResource,
+        All_RWResource,
 
         InputTarget,
     	ColourTarget,
     	DepthStencilTarget,
+
+        Indirect,
 
         Clear,
 
@@ -575,6 +580,11 @@ namespace renderdoc
             return Topology_VertexOffset(topology, primitiveIndex);
         }
 
+        public static bool IsD3D(this GraphicsAPI apitype)
+        {
+            return (apitype == GraphicsAPI.D3D11 || apitype == GraphicsAPI.D3D12);
+        }
+
         public static string Str(this DebugMessageSource source)
         {
             switch (source)
@@ -693,7 +703,7 @@ namespace renderdoc
 
         public static string Str(this ResourceUsage usage, GraphicsAPI apitype)
         {
-            if (apitype == GraphicsAPI.D3D11)
+            if (apitype.IsD3D())
             {
                 switch (usage)
                 {
@@ -706,6 +716,7 @@ namespace renderdoc
                     case ResourceUsage.DS_Constants: return "DS - Constant Buffer";
                     case ResourceUsage.CS_Constants: return "CS - Constant Buffer";
                     case ResourceUsage.PS_Constants: return "PS - Constant Buffer";
+                    case ResourceUsage.All_Constants: return "All - Constant Buffer";
 
                     case ResourceUsage.SO: return "Stream Out";
 
@@ -715,6 +726,7 @@ namespace renderdoc
                     case ResourceUsage.DS_Resource: return "DS - Resource";
                     case ResourceUsage.CS_Resource: return "CS - Resource";
                     case ResourceUsage.PS_Resource: return "PS - Resource";
+                    case ResourceUsage.All_Resource: return "All - Resource";
 
                     case ResourceUsage.VS_RWResource: return "VS - UAV";
                     case ResourceUsage.HS_RWResource: return "HS - UAV";
@@ -722,6 +734,7 @@ namespace renderdoc
                     case ResourceUsage.GS_RWResource: return "GS - UAV";
                     case ResourceUsage.PS_RWResource: return "PS - UAV";
                     case ResourceUsage.CS_RWResource: return "CS - UAV";
+                    case ResourceUsage.All_RWResource: return "All - UAV";
 
                     case ResourceUsage.InputTarget: return "Colour Input";
                     case ResourceUsage.ColourTarget: return "Rendertarget";
@@ -755,6 +768,7 @@ namespace renderdoc
                     case ResourceUsage.DS_Constants: return "DS - Uniform Buffer";
                     case ResourceUsage.CS_Constants: return "CS - Uniform Buffer";
                     case ResourceUsage.PS_Constants: return "PS - Uniform Buffer";
+                    case ResourceUsage.All_Constants: return "All - Uniform Buffer";
 
                     case ResourceUsage.SO: return "Transform Feedback";
 
@@ -764,6 +778,7 @@ namespace renderdoc
                     case ResourceUsage.DS_Resource: return "DS - Texture";
                     case ResourceUsage.CS_Resource: return "CS - Texture";
                     case ResourceUsage.PS_Resource: return "PS - Texture";
+                    case ResourceUsage.All_Resource: return "All - Texture";
 
                     case ResourceUsage.VS_RWResource: return "VS - Image/SSBO";
                     case ResourceUsage.HS_RWResource: return "HS - Image/SSBO";
@@ -771,6 +786,7 @@ namespace renderdoc
                     case ResourceUsage.GS_RWResource: return "GS - Image/SSBO";
                     case ResourceUsage.PS_RWResource: return "PS - Image/SSBO";
                     case ResourceUsage.CS_RWResource: return "CS - Image/SSBO";
+                    case ResourceUsage.All_RWResource: return "All - Image/SSBO";
 
                     case ResourceUsage.InputTarget: return "FBO Input";
                     case ResourceUsage.ColourTarget: return "FBO Colour";
@@ -795,7 +811,7 @@ namespace renderdoc
 
         public static string Str(this ShaderStageType stage, GraphicsAPI apitype)
         {
-            if (apitype == GraphicsAPI.D3D11)
+            if (apitype.IsD3D())
             {
                 switch (stage)
                 {

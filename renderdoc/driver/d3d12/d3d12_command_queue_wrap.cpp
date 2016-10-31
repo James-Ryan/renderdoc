@@ -33,6 +33,7 @@ void STDMETHODCALLTYPE WrappedID3D12CommandQueue::UpdateTileMappings(
     const D3D12_TILE_RANGE_FLAGS *pRangeFlags, const UINT *pHeapRangeStartOffsets,
     const UINT *pRangeTileCounts, D3D12_TILE_MAPPING_FLAGS Flags)
 {
+  D3D12NOTIMP("Tiled Resources");
   m_pReal->UpdateTileMappings(Unwrap(pResource), NumResourceRegions, pResourceRegionStartCoordinates,
                               pResourceRegionSizes, Unwrap(pHeap), NumRanges, pRangeFlags,
                               pHeapRangeStartOffsets, pRangeTileCounts, Flags);
@@ -43,6 +44,7 @@ void STDMETHODCALLTYPE WrappedID3D12CommandQueue::CopyTileMappings(
     ID3D12Resource *pSrcResource, const D3D12_TILED_RESOURCE_COORDINATE *pSrcRegionStartCoordinate,
     const D3D12_TILE_REGION_SIZE *pRegionSize, D3D12_TILE_MAPPING_FLAGS Flags)
 {
+  D3D12NOTIMP("Tiled Resources");
   m_pReal->CopyTileMappings(Unwrap(pDstResource), pDstRegionStartCoordinate, Unwrap(pSrcResource),
                             pSrcRegionStartCoordinate, pRegionSize, Flags);
 }
@@ -80,7 +82,41 @@ bool WrappedID3D12CommandQueue::Serialise_ExecuteCommandLists(UINT NumCommandLis
 
   const string desc = m_pSerialiser->GetDebugStr();
 
-  D3D12NOTIMP("Serialise_DebugMessages");
+  // debug messages
+  {
+    vector<DebugMessage> debugMessages;
+
+    if(m_State == WRITING_CAPFRAME)
+      debugMessages = m_pDevice->GetDebugMessages();
+
+    SERIALISE_ELEMENT(uint32_t, NumMessages, (uint32_t)debugMessages.size());
+
+    for(uint32_t i = 0; i < NumMessages; i++)
+    {
+      ScopedContext msgscope(m_pSerialiser, "DebugMessage", "DebugMessage", 0, false);
+
+      string msgDesc;
+      if(m_State >= WRITING)
+        msgDesc = debugMessages[i].description.elems;
+
+      SERIALISE_ELEMENT(uint32_t, Category, debugMessages[i].category);
+      SERIALISE_ELEMENT(uint32_t, Severity, debugMessages[i].severity);
+      SERIALISE_ELEMENT(uint32_t, ID, debugMessages[i].messageID);
+      SERIALISE_ELEMENT(string, Description, msgDesc);
+
+      if(m_State == READING)
+      {
+        DebugMessage msg;
+        msg.source = eDbgSource_API;
+        msg.category = (DebugMessageCategory)Category;
+        msg.severity = (DebugMessageSeverity)Severity;
+        msg.messageID = ID;
+        msg.description = Description;
+
+        m_Cmd.m_EventMessages.push_back(msg);
+      }
+    }
+  }
 
   if(m_State == READING)
   {
@@ -127,14 +163,12 @@ bool WrappedID3D12CommandQueue::Serialise_ExecuteCommandLists(UINT NumCommandLis
           submits[s] += m_Cmd.m_RootEventID;
       }
 
-      D3D12NOTIMP("Debug Messages");
-      /*
       for(size_t i = 0; i < cmdBufInfo.debugMessages.size(); i++)
       {
-        m_DebugMessages.push_back(cmdBufInfo.debugMessages[i]);
-        m_DebugMessages.back().eventID += m_RootEventID;
+        DebugMessage msg = cmdBufInfo.debugMessages[i];
+        msg.eventID += m_Cmd.m_RootEventID;
+        m_pDevice->AddDebugMessage(msg);
       }
-      */
 
       // only primary command lists can be submitted
       m_Cmd.m_Partial[D3D12CommandData::Primary].cmdListExecs[cmdIds[c]].push_back(
@@ -379,9 +413,6 @@ void STDMETHODCALLTYPE WrappedID3D12CommandQueue::ExecuteCommandLists(
         record->bakedCommands->AddResourceReferences(GetResourceManager());
         record->bakedCommands->AddReferencedIDs(refdIDs);
 
-        // ref the parent command list by itself, this will pull in the cmd buffer pool
-        GetResourceManager()->MarkResourceFrameReferenced(record->GetResourceID(), eFrameRef_Read);
-
         // reference all executed bundles as well
         for(size_t b = 0; b < record->bakedCommands->cmdInfo->bundles.size(); b++)
         {
@@ -408,7 +439,60 @@ void STDMETHODCALLTYPE WrappedID3D12CommandQueue::ExecuteCommandLists(
 
     if(capframe)
     {
-      // flush coherent maps
+      vector<MapState> maps = m_pDevice->GetMaps();
+
+      for(auto it = maps.begin(); it != maps.end(); ++it)
+      {
+        WrappedID3D12Resource *res = it->res;
+        UINT subres = it->subres;
+        size_t size = (size_t)it->totalSize;
+
+        // only need to flush memory that could affect this submitted batch of work
+        if(refdIDs.find(res->GetResourceID()) == refdIDs.end())
+        {
+          RDCDEBUG("Map of memory %llu not referenced in this queue - not flushing",
+                   res->GetResourceID());
+          continue;
+        }
+
+        size_t diffStart = 0, diffEnd = 0;
+        bool found = true;
+
+        byte *ref = res->GetShadow(subres);
+        byte *data = res->GetMap(subres);
+
+        if(ref)
+          found = FindDiffRange(data, ref, size, diffStart, diffEnd);
+        else
+          diffEnd = size;
+
+        if(found)
+        {
+          RDCLOG("Persistent map flush forced for %llu (%llu -> %llu)", res->GetResourceID(),
+                 (uint64_t)diffStart, (uint64_t)diffEnd);
+
+          D3D12_RANGE range = {diffStart, diffEnd};
+
+          m_pDevice->MapDataWrite(res, subres, data, range);
+
+          if(ref == NULL)
+          {
+            res->AllocShadow(subres, size);
+
+            ref = res->GetShadow(subres);
+          }
+
+          // update comparison shadow for next time
+          memcpy(ref, res->GetMap(subres), size);
+
+          GetResourceManager()->MarkPendingDirty(res->GetResourceID());
+        }
+        else
+        {
+          RDCDEBUG("Persistent map flush not needed for %llu", res->GetResourceID());
+        }
+      }
+
       for(UINT i = 0; i < NumCommandLists; i++)
       {
         SCOPED_SERIALISE_CONTEXT(EXECUTE_CMD_LISTS);
@@ -466,8 +550,32 @@ HRESULT STDMETHODCALLTYPE WrappedID3D12CommandQueue::Signal(ID3D12Fence *pFence,
   return m_pReal->Signal(Unwrap(pFence), Value);
 }
 
+bool WrappedID3D12CommandQueue::Serialise_Wait(ID3D12Fence *pFence, UINT64 Value)
+{
+  SERIALISE_ELEMENT(ResourceId, Fence, GetResID(pFence));
+  SERIALISE_ELEMENT(UINT64, val, Value);
+
+  if(m_State <= EXECUTING && GetResourceManager()->HasLiveResource(Fence))
+  {
+    // pFence = GetResourceManager()->GetLiveAs<ID3D12Fence>(Fence);
+
+    m_pDevice->GPUSync();
+  }
+
+  return true;
+}
+
 HRESULT STDMETHODCALLTYPE WrappedID3D12CommandQueue::Wait(ID3D12Fence *pFence, UINT64 Value)
 {
+  if(m_State == WRITING_CAPFRAME)
+  {
+    SCOPED_SERIALISE_CONTEXT(WAIT);
+    Serialise_Wait(pFence, Value);
+
+    m_QueueRecord->AddChunk(scope.Get());
+    GetResourceManager()->MarkResourceFrameReferenced(GetResID(pFence), eFrameRef_Read);
+  }
+
   return m_pReal->Wait(Unwrap(pFence), Value);
 }
 

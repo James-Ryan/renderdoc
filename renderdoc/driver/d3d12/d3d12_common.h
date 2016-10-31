@@ -195,6 +195,8 @@ void Serialiser::Serialise(const char *name, D3D12_INDEX_BUFFER_VIEW &el);
 template <>
 void Serialiser::Serialise(const char *name, D3D12_VERTEX_BUFFER_VIEW &el);
 template <>
+void Serialiser::Serialise(const char *name, D3D12_STREAM_OUTPUT_BUFFER_VIEW &el);
+template <>
 void Serialiser::Serialise(const char *name, D3D12_RESOURCE_BARRIER &el);
 template <>
 void Serialiser::Serialise(const char *name, D3D12_HEAP_PROPERTIES &el);
@@ -277,6 +279,14 @@ void Serialiser::Serialise(const char *name, D3D12Descriptor &el);
                                                                                                    \
   D3D12_CHUNK_MACRO(RESOURCE_BARRIER, "ID3D12GraphicsCommandList::ResourceBarrier")                \
                                                                                                    \
+  D3D12_CHUNK_MACRO(MAP_DATA_WRITE, "ID3D12Resource::Unmap")                                       \
+  D3D12_CHUNK_MACRO(WRITE_TO_SUB, "ID3D12Resource::WriteToSubresource")                            \
+                                                                                                   \
+  D3D12_CHUNK_MACRO(BEGIN_QUERY, "ID3D12GraphicsCommandList::BeginQuery")                          \
+  D3D12_CHUNK_MACRO(END_QUERY, "ID3D12GraphicsCommandList::EndQuery")                              \
+  D3D12_CHUNK_MACRO(RESOLVE_QUERY, "ID3D12GraphicsCommandList::ResolveQueryData")                  \
+  D3D12_CHUNK_MACRO(SET_PREDICATION, "ID3D12GraphicsCommandList::SetPredication")                  \
+                                                                                                   \
   D3D12_CHUNK_MACRO(DRAW_INDEXED_INST, "ID3D12GraphicsCommandList::DrawIndexedInstanced")          \
   D3D12_CHUNK_MACRO(DRAW_INST, "ID3D12GraphicsCommandList::DrawInstanced")                         \
   D3D12_CHUNK_MACRO(DISPATCH, "ID3D12GraphicsCommandList::Dispatch")                               \
@@ -296,6 +306,7 @@ void Serialiser::Serialise(const char *name, D3D12Descriptor &el);
   D3D12_CHUNK_MACRO(SET_TOPOLOGY, "ID3D12GraphicsCommandList::IASetPrimitiveTopology")             \
   D3D12_CHUNK_MACRO(SET_IBUFFER, "ID3D12GraphicsCommandList::IASetIndexBuffer")                    \
   D3D12_CHUNK_MACRO(SET_VBUFFERS, "ID3D12GraphicsCommandList::IASetVertexBuffers")                 \
+  D3D12_CHUNK_MACRO(SET_SOTARGETS, "ID3D12GraphicsCommandList::SOSetTargets")                      \
   D3D12_CHUNK_MACRO(SET_VIEWPORTS, "ID3D12GraphicsCommandList::RSSetViewports")                    \
   D3D12_CHUNK_MACRO(SET_SCISSORS, "ID3D12GraphicsCommandList::RSSetScissors")                      \
   D3D12_CHUNK_MACRO(SET_PIPE, "ID3D12GraphicsCommandList::SetPipelineState")                       \
@@ -335,6 +346,7 @@ void Serialiser::Serialise(const char *name, D3D12Descriptor &el);
                                                                                                    \
   D3D12_CHUNK_MACRO(EXECUTE_CMD_LISTS, "ID3D12GraphicsCommandQueue::ExecuteCommandLists")          \
   D3D12_CHUNK_MACRO(SIGNAL, "ID3D12GraphicsCommandQueue::Signal")                                  \
+  D3D12_CHUNK_MACRO(WAIT, "ID3D12GraphicsCommandQueue::Wait")                                      \
                                                                                                    \
   D3D12_CHUNK_MACRO(NUM_D3D12_CHUNKS, "")
 

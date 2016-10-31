@@ -786,6 +786,8 @@ bool WrappedID3D12GraphicsCommandList::Serialise_IASetIndexBuffer(const D3D12_IN
     {
       list->IASetIndexBuffer(&view);
 
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.ibuffer =
+          WrappedID3D12Resource::GetResIDFromAddr(view.BufferLocation);
       m_Cmd->m_BakedCmdListInfo[CommandList].state.idxWidth =
           (view.Format == DXGI_FORMAT_R32_UINT ? 4 : 2);
     }
@@ -793,6 +795,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_IASetIndexBuffer(const D3D12_IN
     {
       list->IASetIndexBuffer(NULL);
 
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.ibuffer = ResourceId();
       m_Cmd->m_BakedCmdListInfo[CommandList].state.idxWidth = 2;
     }
   }
@@ -850,6 +853,13 @@ bool WrappedID3D12GraphicsCommandList::Serialise_IASetVertexBuffers(
   else if(m_State == READING)
   {
     GetList(CommandList)->IASetVertexBuffers(start, num, views);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.vbuffers.size() < start + num)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.vbuffers.resize(start + num);
+
+    for(UINT i = 0; i < num; i++)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.vbuffers[start + i] =
+          WrappedID3D12Resource::GetResIDFromAddr(views[i].BufferLocation);
   }
 
   SAFE_DELETE_ARRAY(views);
@@ -874,11 +884,75 @@ void WrappedID3D12GraphicsCommandList::IASetVertexBuffers(UINT StartSlot, UINT N
   }
 }
 
+bool WrappedID3D12GraphicsCommandList::Serialise_SOSetTargets(
+    UINT StartSlot, UINT NumViews, const D3D12_STREAM_OUTPUT_BUFFER_VIEW *pViews)
+{
+  SERIALISE_ELEMENT(ResourceId, CommandList, GetResourceID());
+  SERIALISE_ELEMENT(UINT, start, StartSlot);
+  SERIALISE_ELEMENT(UINT, num, NumViews);
+  SERIALISE_ELEMENT_ARR(D3D12_STREAM_OUTPUT_BUFFER_VIEW, views, pViews, num);
+
+  if(m_State < WRITING)
+    m_Cmd->m_LastCmdListID = CommandList;
+
+  if(m_State == EXECUTING)
+  {
+    if(m_Cmd->ShouldRerecordCmd(CommandList) && m_Cmd->InRerecordRange(CommandList))
+    {
+      Unwrap(m_Cmd->RerecordCmdList(CommandList))->SOSetTargets(start, num, views);
+
+      if(m_Cmd->m_RenderState.streamouts.size() < start + num)
+        m_Cmd->m_RenderState.streamouts.resize(start + num);
+
+      for(UINT i = 0; i < num; i++)
+      {
+        D3D12RenderState::StreamOut &so = m_Cmd->m_RenderState.streamouts[start + i];
+
+        WrappedID3D12Resource::GetResIDFromAddr(views[i].BufferLocation, so.buf, so.offs);
+
+        WrappedID3D12Resource::GetResIDFromAddr(views[i].BufferFilledSizeLocation, so.countbuf,
+                                                so.countoffs);
+
+        so.size = views[i].SizeInBytes;
+      }
+    }
+  }
+  else if(m_State == READING)
+  {
+    GetList(CommandList)->SOSetTargets(start, num, views);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.sotargets.size() < start + num)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.sotargets.resize(start + num);
+
+    for(UINT i = 0; i < num; i++)
+    {
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.sotargets[start + i] =
+          WrappedID3D12Resource::GetResIDFromAddr(views[i].BufferLocation);
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.socounters[start + i] =
+          WrappedID3D12Resource::GetResIDFromAddr(views[i].BufferFilledSizeLocation);
+    }
+  }
+
+  SAFE_DELETE_ARRAY(views);
+
+  return true;
+}
+
 void WrappedID3D12GraphicsCommandList::SOSetTargets(UINT StartSlot, UINT NumViews,
                                                     const D3D12_STREAM_OUTPUT_BUFFER_VIEW *pViews)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
   m_pReal->SOSetTargets(StartSlot, NumViews, pViews);
+
+  if(m_State >= WRITING)
+  {
+    SCOPED_SERIALISE_CONTEXT(SET_SOTARGETS);
+    Serialise_SOSetTargets(StartSlot, NumViews, pViews);
+
+    m_ListRecord->AddChunk(scope.Get());
+    for(UINT i = 0; i < NumViews; i++)
+      m_ListRecord->MarkResourceFrameReferenced(
+          WrappedID3D12Resource::GetResIDFromAddr(pViews[i].BufferLocation), eFrameRef_Read);
+  }
 }
 
 bool WrappedID3D12GraphicsCommandList::Serialise_SetPipelineState(ID3D12PipelineState *pPipelineState)
@@ -997,10 +1071,7 @@ bool WrappedID3D12GraphicsCommandList::Serialise_OMSetRenderTargets(
 
     if(singlehandle)
     {
-      WrappedID3D12DescriptorHeap *heap =
-          GetResourceManager()->GetLiveAs<WrappedID3D12DescriptorHeap>(rts[0].heap);
-
-      const D3D12Descriptor *descs = heap->GetDescriptors() + rts[0].index;
+      const D3D12Descriptor *descs = DescriptorFromPortableHandle(GetResourceManager(), rts[0]);
 
       for(UINT i = 0; i < num; i++)
       {
@@ -1024,14 +1095,11 @@ bool WrappedID3D12GraphicsCommandList::Serialise_OMSetRenderTargets(
 
     if(dsv.heap != ResourceId())
     {
-      WrappedID3D12DescriptorHeap *heap =
-          GetResourceManager()->GetLiveAs<WrappedID3D12DescriptorHeap>(dsv.heap);
+      const D3D12Descriptor *desc = DescriptorFromPortableHandle(GetResourceManager(), dsv);
 
-      const D3D12Descriptor &desc = heap->GetDescriptors()[dsv.index];
+      RDCASSERT(desc->GetType() == D3D12Descriptor::TypeDSV);
 
-      RDCASSERT(desc.GetType() == D3D12Descriptor::TypeDSV);
-
-      m_Cmd->m_BakedCmdListInfo[CommandList].state.dsv = GetResID(desc.nonsamp.resource);
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.dsv = GetResID(desc->nonsamp.resource);
     }
 
     SAFE_DELETE_ARRAY(rtHandles);
@@ -1116,6 +1184,10 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetComputeRootSignature(
     pRootSignature = GetResourceManager()->GetLiveAs<ID3D12RootSignature>(sig);
 
     GetList(CommandList)->SetComputeRootSignature(Unwrap(pRootSignature));
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.rootsig != GetResID(pRootSignature))
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.clear();
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.rootsig = GetResID(pRootSignature);
   }
 
   return true;
@@ -1171,6 +1243,15 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetComputeRootDescriptorTable(
     GetList(CommandList)
         ->SetComputeRootDescriptorTable(
             idx, GPUHandleFromPortableHandle(GetResourceManager(), Descriptor));
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.resize(idx + 1);
+
+    WrappedID3D12DescriptorHeap *heap =
+        GetResourceManager()->GetLiveAs<WrappedID3D12DescriptorHeap>(Descriptor.heap);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootTable, GetResID(heap), (UINT64)Descriptor.index);
   }
 
   return true;
@@ -1362,6 +1443,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetComputeRootConstantBufferVie
     WrappedID3D12Resource *pRes = GetResourceManager()->GetLiveAs<WrappedID3D12Resource>(buffer);
 
     GetList(CommandList)->SetComputeRootConstantBufferView(idx, pRes->GetGPUVirtualAddress() + byteOffset);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.resize(idx + 1);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootCBV, GetResID(pRes), byteOffset);
   }
 
   return true;
@@ -1424,6 +1511,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetComputeRootShaderResourceVie
     WrappedID3D12Resource *pRes = GetResourceManager()->GetLiveAs<WrappedID3D12Resource>(buffer);
 
     GetList(CommandList)->SetComputeRootShaderResourceView(idx, pRes->GetGPUVirtualAddress() + byteOffset);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.resize(idx + 1);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootSRV, GetResID(pRes), byteOffset);
   }
 
   return true;
@@ -1487,6 +1580,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetComputeRootUnorderedAccessVi
 
     GetList(CommandList)
         ->SetComputeRootUnorderedAccessView(idx, pRes->GetGPUVirtualAddress() + byteOffset);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.resize(idx + 1);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootUAV, GetResID(pRes), byteOffset);
   }
 
   return true;
@@ -1548,6 +1647,10 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetGraphicsRootSignature(
     pRootSignature = GetResourceManager()->GetLiveAs<ID3D12RootSignature>(sig);
 
     GetList(CommandList)->SetGraphicsRootSignature(Unwrap(pRootSignature));
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.rootsig != GetResID(pRootSignature))
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.sigelems.clear();
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.compute.rootsig = GetResID(pRootSignature);
   }
 
   return true;
@@ -1603,6 +1706,15 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetGraphicsRootDescriptorTable(
     GetList(CommandList)
         ->SetGraphicsRootDescriptorTable(
             idx, GPUHandleFromPortableHandle(GetResourceManager(), Descriptor));
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.resize(idx + 1);
+
+    WrappedID3D12DescriptorHeap *heap =
+        GetResourceManager()->GetLiveAs<WrappedID3D12DescriptorHeap>(Descriptor.heap);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootTable, GetResID(heap), (UINT64)Descriptor.index);
   }
 
   return true;
@@ -1795,6 +1907,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetGraphicsRootConstantBufferVi
 
     GetList(CommandList)
         ->SetGraphicsRootConstantBufferView(idx, pRes->GetGPUVirtualAddress() + byteOffset);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.resize(idx + 1);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootCBV, GetResID(pRes), byteOffset);
   }
 
   return true;
@@ -1858,6 +1976,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetGraphicsRootShaderResourceVi
 
     GetList(CommandList)
         ->SetGraphicsRootShaderResourceView(idx, pRes->GetGPUVirtualAddress() + byteOffset);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.resize(idx + 1);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootSRV, GetResID(pRes), byteOffset);
   }
 
   return true;
@@ -1921,6 +2045,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_SetGraphicsRootUnorderedAccessV
 
     GetList(CommandList)
         ->SetGraphicsRootUnorderedAccessView(idx, pRes->GetGPUVirtualAddress() + byteOffset);
+
+    if(m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.size() < idx + 1)
+      m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems.resize(idx + 1);
+
+    m_Cmd->m_BakedCmdListInfo[CommandList].state.graphics.sigelems[idx] =
+        D3D12RenderState::SignatureElement(eRootUAV, GetResID(pRes), byteOffset);
   }
 
   return true;
@@ -1949,18 +2079,129 @@ void WrappedID3D12GraphicsCommandList::SetGraphicsRootUnorderedAccessView(
 
 #pragma region Queries / Events
 
+bool WrappedID3D12GraphicsCommandList::Serialise_BeginQuery(ID3D12QueryHeap *pQueryHeap,
+                                                            D3D12_QUERY_TYPE Type, UINT Index)
+{
+  SERIALISE_ELEMENT(ResourceId, CommandList, GetResourceID());
+  SERIALISE_ELEMENT(ResourceId, heap, GetResID(pQueryHeap));
+  SERIALISE_ELEMENT(D3D12_QUERY_TYPE, type, Type);
+  SERIALISE_ELEMENT(UINT, idx, Index);
+
+  if(m_State < WRITING)
+    m_Cmd->m_LastCmdListID = CommandList;
+
+  if(m_State == EXECUTING)
+  {
+    if(m_Cmd->ShouldRerecordCmd(CommandList) && m_Cmd->InRerecordRange(CommandList))
+    {
+      pQueryHeap = GetResourceManager()->GetLiveAs<ID3D12QueryHeap>(heap);
+
+      Unwrap(m_Cmd->RerecordCmdList(CommandList))->BeginQuery(pQueryHeap, type, idx);
+    }
+  }
+  else if(m_State == READING)
+  {
+    pQueryHeap = GetResourceManager()->GetLiveAs<ID3D12QueryHeap>(heap);
+
+    GetList(CommandList)->BeginQuery(pQueryHeap, type, idx);
+  }
+
+  return true;
+}
+
 void WrappedID3D12GraphicsCommandList::BeginQuery(ID3D12QueryHeap *pQueryHeap,
                                                   D3D12_QUERY_TYPE Type, UINT Index)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
   m_pReal->BeginQuery(Unwrap(pQueryHeap), Type, Index);
+
+  if(m_State >= WRITING)
+  {
+    SCOPED_SERIALISE_CONTEXT(BEGIN_QUERY);
+    Serialise_BeginQuery(pQueryHeap, Type, Index);
+
+    m_ListRecord->AddChunk(scope.Get());
+  }
+}
+
+bool WrappedID3D12GraphicsCommandList::Serialise_EndQuery(ID3D12QueryHeap *pQueryHeap,
+                                                          D3D12_QUERY_TYPE Type, UINT Index)
+{
+  SERIALISE_ELEMENT(ResourceId, CommandList, GetResourceID());
+  SERIALISE_ELEMENT(ResourceId, heap, GetResID(pQueryHeap));
+  SERIALISE_ELEMENT(D3D12_QUERY_TYPE, type, Type);
+  SERIALISE_ELEMENT(UINT, idx, Index);
+
+  if(m_State < WRITING)
+    m_Cmd->m_LastCmdListID = CommandList;
+
+  if(m_State == EXECUTING)
+  {
+    if(m_Cmd->ShouldRerecordCmd(CommandList) && m_Cmd->InRerecordRange(CommandList))
+    {
+      pQueryHeap = GetResourceManager()->GetLiveAs<ID3D12QueryHeap>(heap);
+
+      Unwrap(m_Cmd->RerecordCmdList(CommandList))->EndQuery(pQueryHeap, type, idx);
+    }
+  }
+  else if(m_State == READING)
+  {
+    pQueryHeap = GetResourceManager()->GetLiveAs<ID3D12QueryHeap>(heap);
+
+    GetList(CommandList)->EndQuery(pQueryHeap, type, idx);
+  }
+
+  return true;
 }
 
 void WrappedID3D12GraphicsCommandList::EndQuery(ID3D12QueryHeap *pQueryHeap, D3D12_QUERY_TYPE Type,
                                                 UINT Index)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
   m_pReal->EndQuery(Unwrap(pQueryHeap), Type, Index);
+
+  if(m_State >= WRITING)
+  {
+    SCOPED_SERIALISE_CONTEXT(END_QUERY);
+    Serialise_EndQuery(pQueryHeap, Type, Index);
+
+    m_ListRecord->AddChunk(scope.Get());
+  }
+}
+
+bool WrappedID3D12GraphicsCommandList::Serialise_ResolveQueryData(
+    ID3D12QueryHeap *pQueryHeap, D3D12_QUERY_TYPE Type, UINT StartIndex, UINT NumQueries,
+    ID3D12Resource *pDestinationBuffer, UINT64 AlignedDestinationBufferOffset)
+{
+  SERIALISE_ELEMENT(ResourceId, CommandList, GetResourceID());
+  SERIALISE_ELEMENT(ResourceId, heap, GetResID(pQueryHeap));
+  SERIALISE_ELEMENT(D3D12_QUERY_TYPE, type, Type);
+  SERIALISE_ELEMENT(UINT, start, StartIndex);
+  SERIALISE_ELEMENT(UINT, num, NumQueries);
+  SERIALISE_ELEMENT(ResourceId, buf, GetResID(pDestinationBuffer));
+  SERIALISE_ELEMENT(UINT64, offs, AlignedDestinationBufferOffset);
+
+  if(m_State < WRITING)
+    m_Cmd->m_LastCmdListID = CommandList;
+
+  if(m_State == EXECUTING)
+  {
+    if(m_Cmd->ShouldRerecordCmd(CommandList) && m_Cmd->InRerecordRange(CommandList))
+    {
+      pQueryHeap = GetResourceManager()->GetLiveAs<ID3D12QueryHeap>(heap);
+      pDestinationBuffer = GetResourceManager()->GetLiveAs<ID3D12Resource>(buf);
+
+      Unwrap(m_Cmd->RerecordCmdList(CommandList))
+          ->ResolveQueryData(pQueryHeap, type, start, num, pDestinationBuffer, offs);
+    }
+  }
+  else if(m_State == READING)
+  {
+    pQueryHeap = GetResourceManager()->GetLiveAs<ID3D12QueryHeap>(heap);
+    pDestinationBuffer = GetResourceManager()->GetLiveAs<ID3D12Resource>(buf);
+
+    GetList(CommandList)->ResolveQueryData(pQueryHeap, type, start, num, pDestinationBuffer, offs);
+  }
+
+  return true;
 }
 
 void WrappedID3D12GraphicsCommandList::ResolveQueryData(ID3D12QueryHeap *pQueryHeap,
@@ -1969,17 +2210,49 @@ void WrappedID3D12GraphicsCommandList::ResolveQueryData(ID3D12QueryHeap *pQueryH
                                                         ID3D12Resource *pDestinationBuffer,
                                                         UINT64 AlignedDestinationBufferOffset)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
   m_pReal->ResolveQueryData(Unwrap(pQueryHeap), Type, StartIndex, NumQueries,
                             Unwrap(pDestinationBuffer), AlignedDestinationBufferOffset);
+
+  if(m_State >= WRITING)
+  {
+    SCOPED_SERIALISE_CONTEXT(RESOLVE_QUERY);
+    Serialise_ResolveQueryData(pQueryHeap, Type, StartIndex, NumQueries, pDestinationBuffer,
+                               AlignedDestinationBufferOffset);
+
+    m_ListRecord->AddChunk(scope.Get());
+  }
+}
+
+bool WrappedID3D12GraphicsCommandList::Serialise_SetPredication(ID3D12Resource *pBuffer,
+                                                                UINT64 AlignedBufferOffset,
+                                                                D3D12_PREDICATION_OP Operation)
+{
+  SERIALISE_ELEMENT(ResourceId, CommandList, GetResourceID());
+  SERIALISE_ELEMENT(ResourceId, buffer, GetResID(pBuffer));
+  SERIALISE_ELEMENT(UINT64, offs, AlignedBufferOffset);
+  SERIALISE_ELEMENT(D3D12_PREDICATION_OP, op, Operation);
+
+  if(m_State < WRITING)
+    m_Cmd->m_LastCmdListID = CommandList;
+
+  // don't replay predication at all
+
+  return true;
 }
 
 void WrappedID3D12GraphicsCommandList::SetPredication(ID3D12Resource *pBuffer,
                                                       UINT64 AlignedBufferOffset,
                                                       D3D12_PREDICATION_OP Operation)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
   m_pReal->SetPredication(Unwrap(pBuffer), AlignedBufferOffset, Operation);
+
+  if(m_State >= WRITING)
+  {
+    SCOPED_SERIALISE_CONTEXT(SET_PREDICATION);
+    Serialise_SetPredication(pBuffer, AlignedBufferOffset, Operation);
+
+    m_ListRecord->AddChunk(scope.Get());
+  }
 }
 
 bool WrappedID3D12GraphicsCommandList::Serialise_SetMarker(UINT Metadata, const void *pData, UINT Size)
@@ -2156,8 +2429,6 @@ bool WrappedID3D12GraphicsCommandList::Serialise_DrawInstanced(UINT VertexCountP
   if(m_State < WRITING)
     m_Cmd->m_LastCmdListID = CommandList;
 
-  D3D12NOTIMP("Serialise_DebugMessages");
-
   if(m_State == EXECUTING)
   {
     if(m_Cmd->ShouldRerecordCmd(CommandList) && m_Cmd->InRerecordRange(CommandList))
@@ -2233,8 +2504,6 @@ bool WrappedID3D12GraphicsCommandList::Serialise_DrawIndexedInstanced(UINT Index
   if(m_State < WRITING)
     m_Cmd->m_LastCmdListID = CommandList;
 
-  D3D12NOTIMP("Serialise_DebugMessages");
-
   if(m_State == EXECUTING)
   {
     if(m_Cmd->ShouldRerecordCmd(CommandList) && m_Cmd->InRerecordRange(CommandList))
@@ -2309,8 +2578,6 @@ bool WrappedID3D12GraphicsCommandList::Serialise_Dispatch(UINT ThreadGroupCountX
   if(m_State < WRITING)
     m_Cmd->m_LastCmdListID = CommandList;
 
-  D3D12NOTIMP("Serialise_DebugMessages");
-
   if(m_State == EXECUTING)
   {
     if(m_Cmd->ShouldRerecordCmd(CommandList) && m_Cmd->InRerecordRange(CommandList))
@@ -2367,7 +2634,7 @@ void WrappedID3D12GraphicsCommandList::Dispatch(UINT ThreadGroupCountX, UINT Thr
 
 void WrappedID3D12GraphicsCommandList::ExecuteBundle(ID3D12GraphicsCommandList *pCommandList)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
+  D3D12NOTIMP("Bundle execution");
   m_pReal->ExecuteBundle(Unwrap(pCommandList));
 }
 
@@ -2385,8 +2652,6 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
 
   if(m_State < WRITING)
     m_Cmd->m_LastCmdListID = CommandList;
-
-  D3D12NOTIMP("Serialise_DebugMessages");
 
   if(m_State == EXECUTING)
   {
@@ -2423,6 +2688,13 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ExecuteIndirect(
     draw.flags |= eDraw_CmdList;
 
     m_Cmd->AddDrawcall(draw, true);
+
+    D3D12DrawcallTreeNode &drawNode = m_Cmd->GetDrawcallStack().back()->children.back();
+
+    drawNode.resourceUsage.push_back(std::make_pair(
+        GetResID(pArgumentBuffer), EventUsage(drawNode.draw.eventID, eUsage_Indirect)));
+    drawNode.resourceUsage.push_back(
+        std::make_pair(GetResID(pCountBuffer), EventUsage(drawNode.draw.eventID, eUsage_Indirect)));
   }
 
   return true;
@@ -2500,12 +2772,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ClearDepthStencilView(
 
       m_Cmd->AddDrawcall(draw, true);
 
-      D3D12NOTIMP("Getting image for DSV to mark usage");
+      D3D12Descriptor *descriptor = DescriptorFromPortableHandle(GetResourceManager(), dsv);
 
-      // D3D12DrawcallTreeNode &drawNode = m_Cmd->GetDrawcallStack().back()->children.back();
+      D3D12DrawcallTreeNode &drawNode = m_Cmd->GetDrawcallStack().back()->children.back();
 
-      // drawNode.resourceUsage.push_back(
-      //    std::make_pair(GetResID(image), EventUsage(drawNode.draw.eventID, eUsage_Clear)));
+      drawNode.resourceUsage.push_back(std::make_pair(
+          GetResID(descriptor->nonsamp.resource), EventUsage(drawNode.draw.eventID, eUsage_Clear)));
     }
   }
 
@@ -2585,12 +2857,12 @@ bool WrappedID3D12GraphicsCommandList::Serialise_ClearRenderTargetView(
 
       m_Cmd->AddDrawcall(draw, true);
 
-      D3D12NOTIMP("Getting image for RTV to mark usage");
+      D3D12Descriptor *descriptor = DescriptorFromPortableHandle(GetResourceManager(), rtv);
 
-      // D3D12DrawcallTreeNode &drawNode = m_Cmd->GetDrawcallStack().back()->children.back();
+      D3D12DrawcallTreeNode &drawNode = m_Cmd->GetDrawcallStack().back()->children.back();
 
-      // drawNode.resourceUsage.push_back(
-      //    std::make_pair(GetResID(image), EventUsage(drawNode.draw.eventID, eUsage_Clear)));
+      drawNode.resourceUsage.push_back(std::make_pair(
+          GetResID(descriptor->nonsamp.resource), EventUsage(drawNode.draw.eventID, eUsage_Clear)));
     }
   }
 
@@ -3224,7 +3496,7 @@ void WrappedID3D12GraphicsCommandList::CopyTiles(
     const D3D12_TILE_REGION_SIZE *pTileRegionSize, ID3D12Resource *pBuffer,
     UINT64 BufferStartOffsetInBytes, D3D12_TILE_COPY_FLAGS Flags)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
+  D3D12NOTIMP("Tiled Resources");
   m_pReal->CopyTiles(Unwrap(pTiledResource), pTileRegionStartCoordinate, pTileRegionSize,
                      Unwrap(pBuffer), BufferStartOffsetInBytes, Flags);
 }

@@ -140,6 +140,20 @@ struct D3D12Descriptor
     return nonsamp.type;
   }
 
+  operator D3D12_CPU_DESCRIPTOR_HANDLE() const
+  {
+    D3D12_CPU_DESCRIPTOR_HANDLE handle;
+    handle.ptr = (SIZE_T) this;
+    return handle;
+  }
+
+  operator D3D12_GPU_DESCRIPTOR_HANDLE() const
+  {
+    D3D12_GPU_DESCRIPTOR_HANDLE handle;
+    handle.ptr = (SIZE_T) this;
+    return handle;
+  }
+
   void Init(const D3D12_SAMPLER_DESC *pDesc);
   void Init(const D3D12_CONSTANT_BUFFER_VIEW_DESC *pDesc);
   void Init(ID3D12Resource *pResource, const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc);
@@ -225,6 +239,7 @@ D3D12_CPU_DESCRIPTOR_HANDLE CPUHandleFromPortableHandle(D3D12ResourceManager *ma
                                                         PortableHandle handle);
 D3D12_GPU_DESCRIPTOR_HANDLE GPUHandleFromPortableHandle(D3D12ResourceManager *manager,
                                                         PortableHandle handle);
+D3D12Descriptor *DescriptorFromPortableHandle(D3D12ResourceManager *manager, PortableHandle handle);
 
 struct DynamicDescriptorWrite
 {
@@ -262,6 +277,15 @@ struct CmdListRecordingInfo
 
   // bundles executed
   vector<D3D12ResourceRecord *> bundles;
+};
+
+class WrappedID3D12Resource;
+
+struct MapState
+{
+  WrappedID3D12Resource *res;
+  UINT subres;
+  UINT64 totalSize;
 };
 
 struct D3D12ResourceRecord : public ResourceRecord
@@ -307,6 +331,14 @@ struct D3D12ResourceRecord : public ResourceRecord
   D3D12ResourceType type;
   D3D12ResourceRecord *bakedCommands;
   CmdListRecordingInfo *cmdInfo;
+
+  struct MapData
+  {
+    byte *realPtr;
+    byte *shadowPtr;
+  };
+
+  vector<MapData> m_Map;
 };
 
 typedef vector<D3D12_RESOURCE_STATES> SubresourceStateVector;

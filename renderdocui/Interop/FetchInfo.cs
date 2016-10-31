@@ -497,7 +497,8 @@ namespace renderdoc
         public UInt32 frameNumber;
         public UInt32 firstEvent;
         public UInt64 fileOffset;
-        public UInt64 fileSize;
+        public UInt64 uncompressedFileSize;
+        public UInt64 compressedFileSize;
         public UInt64 persistentSize;
         public UInt64 initDataSize;
         public UInt64 captureTime;
@@ -779,7 +780,7 @@ namespace renderdoc
         {
             get
             {
-                return pipelineType == GraphicsAPI.D3D11 ? ".hlsl" : ".glsl";
+                return pipelineType.IsD3D() ? ".hlsl" : ".glsl";
             }
         }
     };

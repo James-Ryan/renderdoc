@@ -579,19 +579,14 @@ bool WrappedID3D12Device::Serialise_DynamicDescriptorWrite(Serialiser *localSeri
 
   if(m_State <= EXECUTING)
   {
-    WrappedID3D12DescriptorHeap *heap =
-        GetResourceManager()->GetLiveAs<WrappedID3D12DescriptorHeap>(dst.heap);
+    D3D12Descriptor *handle = DescriptorFromPortableHandle(GetResourceManager(), dst);
 
-    if(heap)
+    if(handle)
     {
-      // get the wrapped handle
-      D3D12_CPU_DESCRIPTOR_HANDLE handle = heap->GetCPUDescriptorHandleForHeapStart();
-      handle.ptr += dst.index * sizeof(D3D12Descriptor);
-
       // safe to pass an invalid heap type to Create() as these descriptors will by definition not
       // be undefined
       RDCASSERT(desc.GetType() != D3D12Descriptor::TypeUndefined);
-      desc.Create(D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES, this, handle);
+      desc.Create(D3D12_DESCRIPTOR_HEAP_TYPE_NUM_TYPES, this, *handle);
     }
   }
 
@@ -601,8 +596,15 @@ bool WrappedID3D12Device::Serialise_DynamicDescriptorWrite(Serialiser *localSeri
 void WrappedID3D12Device::CreateConstantBufferView(const D3D12_CONSTANT_BUFFER_VIEW_DESC *pDesc,
                                                    D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
   // assume descriptors are volatile
-  if(m_State == WRITING_CAPFRAME)
+  if(capframe)
   {
     DynamicDescriptorWrite write;
     write.desc.samp.heap = NULL;
@@ -637,8 +639,15 @@ void WrappedID3D12Device::CreateShaderResourceView(ID3D12Resource *pResource,
                                                    const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc,
                                                    D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
   // assume descriptors are volatile
-  if(m_State == WRITING_CAPFRAME)
+  if(capframe)
   {
     DynamicDescriptorWrite write;
     write.desc.samp.heap = NULL;
@@ -665,6 +674,14 @@ void WrappedID3D12Device::CreateShaderResourceView(ID3D12Resource *pResource,
   {
     GetWrapped(DestDescriptor)->Init(pResource, pDesc);
   }
+
+  if(m_State < WRITING && pDesc)
+  {
+    if(pDesc->ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBE ||
+       pDesc->ViewDimension == D3D12_SRV_DIMENSION_TEXTURECUBEARRAY)
+      m_Cubemaps.insert(GetResID(pResource));
+  }
+
   return m_pDevice->CreateShaderResourceView(Unwrap(pResource), pDesc, Unwrap(DestDescriptor));
 }
 
@@ -673,8 +690,15 @@ void WrappedID3D12Device::CreateUnorderedAccessView(ID3D12Resource *pResource,
                                                     const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc,
                                                     D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
   // assume descriptors are volatile
-  if(m_State == WRITING_CAPFRAME)
+  if(capframe)
   {
     DynamicDescriptorWrite write;
     write.desc.samp.heap = NULL;
@@ -711,8 +735,15 @@ void WrappedID3D12Device::CreateRenderTargetView(ID3D12Resource *pResource,
                                                  const D3D12_RENDER_TARGET_VIEW_DESC *pDesc,
                                                  D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
   // assume descriptors are volatile
-  if(m_State == WRITING_CAPFRAME)
+  if(capframe)
   {
     DynamicDescriptorWrite write;
     write.desc.samp.heap = NULL;
@@ -746,8 +777,15 @@ void WrappedID3D12Device::CreateDepthStencilView(ID3D12Resource *pResource,
                                                  const D3D12_DEPTH_STENCIL_VIEW_DESC *pDesc,
                                                  D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
   // assume descriptors are volatile
-  if(m_State == WRITING_CAPFRAME)
+  if(capframe)
   {
     DynamicDescriptorWrite write;
     write.desc.samp.heap = NULL;
@@ -780,8 +818,15 @@ void WrappedID3D12Device::CreateDepthStencilView(ID3D12Resource *pResource,
 void WrappedID3D12Device::CreateSampler(const D3D12_SAMPLER_DESC *pDesc,
                                         D3D12_CPU_DESCRIPTOR_HANDLE DestDescriptor)
 {
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
   // assume descriptors are volatile
-  if(m_State == WRITING_CAPFRAME)
+  if(capframe)
   {
     DynamicDescriptorWrite write;
     write.desc.samp.heap = NULL;
@@ -1098,7 +1143,7 @@ HRESULT WrappedID3D12Device::CreateReservedResource(const D3D12_RESOURCE_DESC *p
                                                     const D3D12_CLEAR_VALUE *pOptimizedClearValue,
                                                     REFIID riid, void **ppvResource)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
+  D3D12NOTIMP("Tiled Resources");
   return m_pDevice->CreateReservedResource(pDesc, InitialState, pOptimizedClearValue, riid,
                                            ppvResource);
 }
@@ -1336,7 +1381,7 @@ HRESULT WrappedID3D12Device::CreateSharedHandle(ID3D12DeviceChild *pObject,
                                                 const SECURITY_ATTRIBUTES *pAttributes,
                                                 DWORD Access, LPCWSTR Name, HANDLE *pHandle)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
+  D3D12NOTIMP("Shared Handles / API interop");
   return m_pDevice->CreateSharedHandle(Unwrap(pObject), pAttributes, Access, Name, pHandle);
 }
 
@@ -1356,10 +1401,9 @@ bool WrappedID3D12Device::Serialise_DynamicDescriptorCopies(
 
     if(m_State <= EXECUTING)
     {
-      D3D12_CPU_DESCRIPTOR_HANDLE dsthandle = CPUHandleFromPortableHandle(GetResourceManager(), dst);
-      D3D12_CPU_DESCRIPTOR_HANDLE srchandle = CPUHandleFromPortableHandle(GetResourceManager(), src);
-
-      m_pDevice->CopyDescriptorsSimple(1, dsthandle, srchandle, type);
+      // do a wrapped copy so that internal tracking is also updated
+      CopyDescriptorsSimple(1, *DescriptorFromPortableHandle(GetResourceManager(), dst),
+                            *DescriptorFromPortableHandle(GetResourceManager(), src), type);
     }
   }
 
@@ -1396,6 +1440,13 @@ void WrappedID3D12Device::CopyDescriptors(
 
   std::vector<DynamicDescriptorCopy> copies;
 
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
   for(; srcRange < NumSrcDescriptorRanges && dstRange < NumDestDescriptorRanges;)
   {
     const UINT srcSize = pSrcDescriptorRangeSizes ? pSrcDescriptorRangeSizes[srcRange] : 1;
@@ -1405,7 +1456,7 @@ void WrappedID3D12Device::CopyDescriptors(
     if(srcIdx < srcSize && dstIdx < dstSize)
     {
       // assume descriptors are volatile
-      if(m_State == WRITING_CAPFRAME)
+      if(capframe)
         copies.push_back(DynamicDescriptorCopy(&dst[dstIdx], &src[srcIdx], DescriptorHeapsType));
       else
         dst[dstIdx].CopyFrom(src[srcIdx]);
@@ -1435,7 +1486,7 @@ void WrappedID3D12Device::CopyDescriptors(
     }
   }
 
-  if(m_State == WRITING_CAPFRAME && !copies.empty())
+  if(!copies.empty())
   {
     // reference all the individual heaps
     for(UINT i = 0; i < NumSrcDescriptorRanges; i++)
@@ -1477,9 +1528,26 @@ void WrappedID3D12Device::CopyDescriptorsSimple(UINT NumDescriptors,
   D3D12Descriptor *src = GetWrapped(SrcDescriptorRangeStart);
   D3D12Descriptor *dst = GetWrapped(DestDescriptorRangeStart);
 
-  // assume descriptors are volatile
-  if(m_State == WRITING_CAPFRAME)
+  bool capframe = false;
+
   {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
+  if(capframe)
+  {
+    // reference the heaps
+    {
+      D3D12Descriptor *desc = GetWrapped(SrcDescriptorRangeStart);
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(desc->samp.heap), eFrameRef_Read);
+    }
+
+    {
+      D3D12Descriptor *desc = GetWrapped(DestDescriptorRangeStart);
+      GetResourceManager()->MarkResourceFrameReferenced(GetResID(desc->samp.heap), eFrameRef_Read);
+    }
+
     std::vector<DynamicDescriptorCopy> copies;
     copies.reserve(NumDescriptors);
     for(UINT i = 0; i < NumDescriptors; i++)
@@ -1508,26 +1576,92 @@ void WrappedID3D12Device::CopyDescriptorsSimple(UINT NumDescriptors,
 
 HRESULT WrappedID3D12Device::OpenSharedHandle(HANDLE NTHandle, REFIID riid, void **ppvObj)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
+  D3D12NOTIMP("Shared Handles / API interop");
   return m_pDevice->OpenSharedHandle(NTHandle, riid, ppvObj);
 }
 
 HRESULT WrappedID3D12Device::OpenSharedHandleByName(LPCWSTR Name, DWORD Access, HANDLE *pNTHandle)
 {
-  D3D12NOTIMP(__PRETTY_FUNCTION_SIGNATURE__);
+  D3D12NOTIMP("Shared Handles / API interop");
   return m_pDevice->OpenSharedHandleByName(Name, Access, pNTHandle);
 }
 
 HRESULT WrappedID3D12Device::MakeResident(UINT NumObjects, ID3D12Pageable *const *ppObjects)
 {
-  RDCUNIMPLEMENTED("MakeResident");    // need to unwrap objects
-  return m_pDevice->MakeResident(NumObjects, ppObjects);
+  ID3D12Pageable **unwrapped = GetTempArray<ID3D12Pageable *>(NumObjects);
+
+  for(UINT i = 0; i < NumObjects; i++)
+  {
+    if(WrappedID3D12DescriptorHeap::IsAlloc(ppObjects[i]))
+    {
+      WrappedID3D12DescriptorHeap *heap = (WrappedID3D12DescriptorHeap *)ppObjects[i];
+      heap->SetResident(true);
+      unwrapped[i] = heap->GetReal();
+    }
+    else if(WrappedID3D12Resource::IsAlloc(ppObjects[i]))
+    {
+      WrappedID3D12Resource *res = (WrappedID3D12Resource *)ppObjects[i];
+      res->SetResident(true);
+      unwrapped[i] = res->GetReal();
+    }
+    else
+    {
+      unwrapped[i] = (ID3D12Pageable *)Unwrap((ID3D12DeviceChild *)ppObjects[i]);
+    }
+  }
+
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
+  if(capframe)
+  {
+    // serialise
+  }
+
+  return m_pDevice->MakeResident(NumObjects, unwrapped);
 }
 
 HRESULT WrappedID3D12Device::Evict(UINT NumObjects, ID3D12Pageable *const *ppObjects)
 {
-  RDCUNIMPLEMENTED("Evict");    // need to unwrap objects
-  return m_pDevice->Evict(NumObjects, ppObjects);
+  ID3D12Pageable **unwrapped = GetTempArray<ID3D12Pageable *>(NumObjects);
+
+  for(UINT i = 0; i < NumObjects; i++)
+  {
+    if(WrappedID3D12DescriptorHeap::IsAlloc(ppObjects[i]))
+    {
+      WrappedID3D12DescriptorHeap *heap = (WrappedID3D12DescriptorHeap *)ppObjects[i];
+      heap->SetResident(false);
+      unwrapped[i] = heap->GetReal();
+    }
+    else if(WrappedID3D12Resource::IsAlloc(ppObjects[i]))
+    {
+      WrappedID3D12Resource *res = (WrappedID3D12Resource *)ppObjects[i];
+      res->SetResident(false);
+      unwrapped[i] = res->GetReal();
+    }
+    else
+    {
+      unwrapped[i] = (ID3D12Pageable *)Unwrap((ID3D12DeviceChild *)ppObjects[i]);
+    }
+  }
+
+  bool capframe = false;
+
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
+  if(capframe)
+  {
+    // serialise
+  }
+
+  return m_pDevice->Evict(NumObjects, unwrapped);
 }
 
 //////////////////////////////////////////////////////////////////////

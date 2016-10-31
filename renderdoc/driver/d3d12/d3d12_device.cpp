@@ -294,6 +294,10 @@ WrappedID3D12Device::WrappedID3D12Device(ID3D12Device *realDevice, D3D12InitPara
           // will be potentially highlighted in the pipeline view
           D3D12_MESSAGE_ID_INVALID_DESCRIPTOR_HANDLE,
           D3D12_MESSAGE_ID_COMMAND_LIST_DESCRIPTOR_TABLE_NOT_SET,
+
+          // message about a NULL range to map for reading/writing the whole resource
+          // which is "inefficient" but for our use cases it's almost always what we mean.
+          D3D12_MESSAGE_ID_MAP_INVALID_NULLRANGE,
       };
 
       D3D12_INFO_QUEUE_FILTER filter = {};
@@ -327,6 +331,12 @@ WrappedID3D12Device::~WrappedID3D12Device()
   {
     RDCASSERT(m_DeviceRecord->GetRefCount() == 1);
     m_DeviceRecord->Delete(GetResourceManager());
+  }
+
+  if(m_FrameCaptureRecord)
+  {
+    RDCASSERT(m_FrameCaptureRecord->GetRefCount() == 1);
+    m_FrameCaptureRecord->Delete(GetResourceManager());
   }
 
   m_ResourceManager->Shutdown();
@@ -692,6 +702,195 @@ IUnknown *WrappedID3D12Device::WrapSwapchainBuffer(WrappedIDXGISwapChain3 *swap,
   return pRes;
 }
 
+void WrappedID3D12Device::Map(WrappedID3D12Resource *Resource, UINT Subresource)
+{
+  MapState map;
+  map.res = Resource;
+  map.subres = Subresource;
+
+  D3D12_RESOURCE_DESC desc = Resource->GetDesc();
+
+  m_pDevice->GetCopyableFootprints(&desc, Subresource, 1, 0, NULL, NULL, NULL, &map.totalSize);
+
+  {
+    SCOPED_LOCK(m_MapsLock);
+    m_Maps.push_back(map);
+  }
+}
+
+void WrappedID3D12Device::Unmap(WrappedID3D12Resource *Resource, UINT Subresource, byte *mapPtr,
+                                const D3D12_RANGE *pWrittenRange)
+{
+  MapState map = {};
+  {
+    SCOPED_LOCK(m_MapsLock);
+    for(auto it = m_Maps.begin(); it != m_Maps.end(); ++it)
+    {
+      if(it->res == Resource && it->subres == Subresource)
+      {
+        map = *it;
+        m_Maps.erase(it);
+        break;
+      }
+    }
+  }
+
+  if(map.res == NULL)
+    return;
+
+  bool capframe = false;
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
+  D3D12_RANGE range = {0, (SIZE_T)map.totalSize};
+
+  if(pWrittenRange)
+    range = *pWrittenRange;
+
+  if(capframe)
+    MapDataWrite(Resource, Subresource, mapPtr, range);
+}
+
+bool WrappedID3D12Device::Serialise_MapDataWrite(Serialiser *localSerialiser,
+                                                 WrappedID3D12Resource *Resource, UINT Subresource,
+                                                 byte *mapPtr, D3D12_RANGE range)
+{
+  SERIALISE_ELEMENT(ResourceId, res, GetResID(Resource));
+  SERIALISE_ELEMENT(UINT, sub, Subresource);
+  SERIALISE_ELEMENT_BUF(byte *, data, mapPtr, range.End - range.Begin);
+  SERIALISE_ELEMENT(uint64_t, begin, (uint64_t)range.Begin);
+  SERIALISE_ELEMENT(uint64_t, end, (uint64_t)range.End);
+
+  if(m_State < WRITING && GetResourceManager()->HasLiveResource(res))
+  {
+    ID3D12Resource *r = GetResourceManager()->GetLiveAs<ID3D12Resource>(res);
+
+    range.Begin = range.End = 0;
+
+    mapPtr = NULL;
+    HRESULT hr = r->Map(sub, &range, (void **)&mapPtr);
+
+    if(SUCCEEDED(hr))
+    {
+      memcpy(mapPtr + begin, data, size_t(end - begin));
+
+      range.Begin = (size_t)begin;
+      range.End = (size_t)end;
+
+      r->Unmap(sub, &range);
+    }
+    else
+    {
+      RDCERR("Failed to map resource on replay %08x", hr);
+    }
+
+    SAFE_DELETE_ARRAY(data);
+  }
+
+  return true;
+}
+
+void WrappedID3D12Device::MapDataWrite(WrappedID3D12Resource *Resource, UINT Subresource,
+                                       byte *mapPtr, D3D12_RANGE range)
+{
+  CACHE_THREAD_SERIALISER();
+
+  SCOPED_SERIALISE_CONTEXT(MAP_DATA_WRITE);
+  Serialise_MapDataWrite(localSerialiser, Resource, Subresource, mapPtr, range);
+
+  m_FrameCaptureRecord->AddChunk(scope.Get());
+
+  GetResourceManager()->MarkResourceFrameReferenced(Resource->GetResourceID(), eFrameRef_Write);
+}
+
+bool WrappedID3D12Device::Serialise_WriteToSubresource(Serialiser *localSerialiser,
+                                                       WrappedID3D12Resource *Resource,
+                                                       UINT Subresource, const D3D12_BOX *pDstBox,
+                                                       const void *pSrcData, UINT SrcRowPitch,
+                                                       UINT SrcDepthPitch)
+{
+  SERIALISE_ELEMENT(ResourceId, res, GetResID(Resource));
+  SERIALISE_ELEMENT(UINT, sub, Subresource);
+  SERIALISE_ELEMENT(bool, HasBox, pDstBox != NULL);
+  SERIALISE_ELEMENT_OPT(D3D12_BOX, box, *pDstBox, HasBox);
+  SERIALISE_ELEMENT(UINT, rowPitch, SrcRowPitch);
+  SERIALISE_ELEMENT(UINT, depthPitch, SrcDepthPitch);
+
+  size_t dataSize = 0;
+
+  if(m_State >= WRITING)
+  {
+    // if we have a box, calculate how much data from user's pitch
+    if(HasBox)
+    {
+      UINT numSlicesBeforeLast = pDstBox->back - pDstBox->front - 1;
+      UINT numRows = pDstBox->bottom - pDstBox->top;
+
+      dataSize = depthPitch * numSlicesBeforeLast + rowPitch * numRows;
+    }
+    else
+    {
+      D3D12_RESOURCE_DESC desc = Resource->GetDesc();
+      UINT64 totalBytes = 0;
+
+      // otherwise fetch the whole resource size
+      m_pDevice->GetCopyableFootprints(&desc, sub, 1, 0, NULL, NULL, NULL, &totalBytes);
+
+      dataSize = (size_t)totalBytes;
+    }
+  }
+
+  SERIALISE_ELEMENT_BUF(byte *, data, pSrcData, dataSize);
+
+  if(m_State < WRITING && GetResourceManager()->HasLiveResource(res))
+  {
+    ID3D12Resource *r = GetResourceManager()->GetLiveAs<ID3D12Resource>(res);
+
+    HRESULT hr = r->Map(sub, NULL, NULL);
+
+    if(SUCCEEDED(hr))
+    {
+      r->WriteToSubresource(sub, HasBox ? &box : NULL, data, rowPitch, depthPitch);
+
+      r->Unmap(sub, NULL);
+    }
+    else
+    {
+      RDCERR("Failed to map resource on replay %08x", hr);
+    }
+
+    SAFE_DELETE_ARRAY(data);
+  }
+
+  return true;
+}
+
+void WrappedID3D12Device::WriteToSubresource(WrappedID3D12Resource *Resource, UINT Subresource,
+                                             const D3D12_BOX *pDstBox, const void *pSrcData,
+                                             UINT SrcRowPitch, UINT SrcDepthPitch)
+{
+  bool capframe = false;
+  {
+    SCOPED_LOCK(m_CapTransitionLock);
+    capframe = (m_State == WRITING_CAPFRAME);
+  }
+
+  if(capframe)
+  {
+    CACHE_THREAD_SERIALISER();
+
+    SCOPED_SERIALISE_CONTEXT(WRITE_TO_SUB);
+    Serialise_WriteToSubresource(localSerialiser, Resource, Subresource, pDstBox, pSrcData,
+                                 SrcRowPitch, SrcDepthPitch);
+
+    m_FrameCaptureRecord->AddChunk(scope.Get());
+
+    GetResourceManager()->MarkResourceFrameReferenced(Resource->GetResourceID(), eFrameRef_Write);
+  }
+}
+
 HRESULT WrappedID3D12Device::Present(WrappedIDXGISwapChain3 *swap, UINT SyncInterval, UINT Flags)
 {
   if((Flags & DXGI_PRESENT_TEST) != 0)
@@ -880,6 +1079,9 @@ void WrappedID3D12Device::StartFrameCapture(void *dev, void *wnd)
   RDCEraseEl(frame.stats);
   m_CapturedFrames.push_back(frame);
 
+  GetDebugMessages();
+  m_DebugMessages.clear();
+
   GetResourceManager()->ClearReferencedResources();
 
   GetResourceManager()->MarkResourceFrameReferenced(m_ResourceID, eFrameRef_Read);
@@ -890,6 +1092,9 @@ void WrappedID3D12Device::StartFrameCapture(void *dev, void *wnd)
   {
     SCOPED_LOCK(m_CapTransitionLock);
     GetResourceManager()->PrepareInitialContents();
+
+    ExecuteLists();
+    FlushLists();
 
     RDCDEBUG("Attempting capture");
     m_FrameCaptureRecord->DeleteChunks();
@@ -964,6 +1169,12 @@ bool WrappedID3D12Device::EndFrameCapture(void *dev, void *wnd)
     m_State = WRITING_IDLE;
 
     GPUSync();
+
+    {
+      SCOPED_LOCK(m_MapsLock);
+      for(auto it = m_Maps.begin(); it != m_Maps.end(); ++it)
+        it->res->FreeShadow();
+    }
   }
 
   byte *thpixels = NULL;
@@ -1269,8 +1480,6 @@ bool WrappedID3D12Device::Serialise_ReleaseResource(Serialiser *localSerialiser,
 
 void WrappedID3D12Device::ReleaseResource(ID3D12DeviceChild *res)
 {
-  D3D12NOTIMP("ReleaseResource");
-
   ResourceId id = GetResID(res);
 
   {
@@ -1286,6 +1495,91 @@ void WrappedID3D12Device::ReleaseResource(ID3D12DeviceChild *res)
       GetResourceManager()->EraseLiveResource(id);
     return;
   }
+}
+
+vector<DebugMessage> WrappedID3D12Device::GetDebugMessages()
+{
+  vector<DebugMessage> ret;
+
+  // if reading, m_DebugMessages will contain all the messages (we
+  // don't try and fetch anything from the API). If writing,
+  // m_DebugMessages will contain any manually-added messages.
+  ret.swap(m_DebugMessages);
+
+  if(m_State < WRITING)
+    return ret;
+
+  if(!m_pInfoQueue)
+    return ret;
+
+  UINT64 numMessages = m_pInfoQueue->GetNumStoredMessagesAllowedByRetrievalFilter();
+
+  for(UINT64 i = 0; i < m_pInfoQueue->GetNumStoredMessagesAllowedByRetrievalFilter(); i++)
+  {
+    SIZE_T len = 0;
+    m_pInfoQueue->GetMessage(i, NULL, &len);
+
+    char *msgbuf = new char[len];
+    D3D12_MESSAGE *message = (D3D12_MESSAGE *)msgbuf;
+
+    m_pInfoQueue->GetMessage(i, message, &len);
+
+    DebugMessage msg;
+    msg.eventID = 0;
+    msg.source = eDbgSource_API;
+    msg.category = eDbgCategory_Miscellaneous;
+    msg.severity = eDbgSeverity_Medium;
+
+    switch(message->Category)
+    {
+      case D3D12_MESSAGE_CATEGORY_APPLICATION_DEFINED:
+        msg.category = eDbgCategory_Application_Defined;
+        break;
+      case D3D12_MESSAGE_CATEGORY_MISCELLANEOUS: msg.category = eDbgCategory_Miscellaneous; break;
+      case D3D12_MESSAGE_CATEGORY_INITIALIZATION: msg.category = eDbgCategory_Initialization; break;
+      case D3D12_MESSAGE_CATEGORY_CLEANUP: msg.category = eDbgCategory_Cleanup; break;
+      case D3D12_MESSAGE_CATEGORY_COMPILATION: msg.category = eDbgCategory_Compilation; break;
+      case D3D12_MESSAGE_CATEGORY_STATE_CREATION: msg.category = eDbgCategory_State_Creation; break;
+      case D3D12_MESSAGE_CATEGORY_STATE_SETTING: msg.category = eDbgCategory_State_Setting; break;
+      case D3D12_MESSAGE_CATEGORY_STATE_GETTING: msg.category = eDbgCategory_State_Getting; break;
+      case D3D12_MESSAGE_CATEGORY_RESOURCE_MANIPULATION:
+        msg.category = eDbgCategory_Resource_Manipulation;
+        break;
+      case D3D12_MESSAGE_CATEGORY_EXECUTION: msg.category = eDbgCategory_Execution; break;
+      case D3D12_MESSAGE_CATEGORY_SHADER: msg.category = eDbgCategory_Shaders; break;
+      default: RDCWARN("Unexpected message category: %d", message->Category); break;
+    }
+
+    switch(message->Severity)
+    {
+      case D3D12_MESSAGE_SEVERITY_CORRUPTION: msg.severity = eDbgSeverity_High; break;
+      case D3D12_MESSAGE_SEVERITY_ERROR: msg.severity = eDbgSeverity_Medium; break;
+      case D3D12_MESSAGE_SEVERITY_WARNING: msg.severity = eDbgSeverity_Low; break;
+      case D3D12_MESSAGE_SEVERITY_INFO: msg.severity = eDbgSeverity_Info; break;
+      case D3D12_MESSAGE_SEVERITY_MESSAGE: msg.severity = eDbgSeverity_Info; break;
+      default: RDCWARN("Unexpected message severity: %d", message->Severity); break;
+    }
+
+    msg.messageID = (uint32_t)message->ID;
+    msg.description = string(message->pDescription);
+
+    ret.push_back(msg);
+
+    SAFE_DELETE_ARRAY(msgbuf);
+  }
+
+  // Docs are fuzzy on the thread safety of the info queue, but I'm going to assume it should only
+  // ever be accessed on one thread since it's tied to the device & immediate context.
+  // There doesn't seem to be a way to lock it for access and without that there's no way to know
+  // that a new message won't be added between the time you retrieve the last one and clearing the
+  // queue. There is also no way to pop a message that I can see, which would presumably be the
+  // best way if its member functions are thread safe themselves (if the queue is protected
+  // internally).
+  RDCASSERT(numMessages == m_pInfoQueue->GetNumStoredMessagesAllowedByRetrievalFilter());
+
+  m_pInfoQueue->ClearStoredMessages();
+
+  return ret;
 }
 
 void WrappedID3D12Device::FlushPendingDescriptorWrites()
@@ -1315,7 +1609,7 @@ bool WrappedID3D12Device::Serialise_SetShaderDebugPath(Serialiser *localSerialis
 
   if(m_State < WRITING && GetResourceManager()->HasLiveResource(resource))
   {
-    RDCUNIMPLEMENTED("SetDebugInfoPath");
+    RDCERR("SetDebugInfoPath doesn't work as-is because it can't specify a shader specific path");
   }
 
   return true;
@@ -1755,7 +2049,8 @@ void WrappedID3D12Device::ReadLogInitialisation()
   }
 #endif
 
-  m_FrameRecord.frameInfo.fileSize = m_pSerialiser->GetSize();
+  m_FrameRecord.frameInfo.uncompressedFileSize = m_pSerialiser->GetSize();
+  m_FrameRecord.frameInfo.compressedFileSize = m_pSerialiser->GetFileSize();
   m_FrameRecord.frameInfo.persistentSize = m_pSerialiser->GetSize() - frameOffset;
   m_FrameRecord.frameInfo.initDataSize = chunkInfos[(D3D12ChunkType)INITIAL_CONTENTS].totalsize;
 

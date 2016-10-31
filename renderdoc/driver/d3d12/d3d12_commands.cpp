@@ -264,6 +264,24 @@ void WrappedID3D12CommandQueue::ProcessChunk(uint64_t offset, D3D12ChunkType chu
 
     case RESOURCE_BARRIER: m_ReplayList->Serialise_ResourceBarrier(0, NULL); break;
 
+    case MAP_DATA_WRITE:
+      m_pDevice->Serialise_MapDataWrite(m_pSerialiser, NULL, 0, NULL, D3D12_RANGE());
+      break;
+    case WRITE_TO_SUB:
+      m_pDevice->Serialise_WriteToSubresource(m_pSerialiser, NULL, 0, NULL, NULL, 0, 0);
+      break;
+
+    case BEGIN_QUERY:
+      m_ReplayList->Serialise_BeginQuery(NULL, D3D12_QUERY_TYPE_OCCLUSION, 0);
+      break;
+    case END_QUERY: m_ReplayList->Serialise_EndQuery(NULL, D3D12_QUERY_TYPE_OCCLUSION, 0); break;
+    case RESOLVE_QUERY:
+      m_ReplayList->Serialise_ResolveQueryData(NULL, D3D12_QUERY_TYPE_OCCLUSION, 0, 0, NULL, 0);
+      break;
+    case SET_PREDICATION:
+      m_ReplayList->Serialise_SetPredication(NULL, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+      break;
+
     case BEGIN_EVENT: m_ReplayList->Serialise_BeginEvent(0, NULL, 0); break;
     case SET_MARKER: m_ReplayList->Serialise_SetMarker(0, NULL, 0); break;
     case END_EVENT: m_ReplayList->Serialise_EndEvent(); break;
@@ -303,6 +321,7 @@ void WrappedID3D12CommandQueue::ProcessChunk(uint64_t offset, D3D12ChunkType chu
       break;
     case SET_IBUFFER: m_ReplayList->Serialise_IASetIndexBuffer(NULL); break;
     case SET_VBUFFERS: m_ReplayList->Serialise_IASetVertexBuffers(0, 0, NULL); break;
+    case SET_SOTARGETS: m_ReplayList->Serialise_SOSetTargets(0, 0, NULL); break;
     case SET_VIEWPORTS: m_ReplayList->Serialise_RSSetViewports(0, NULL); break;
     case SET_SCISSORS: m_ReplayList->Serialise_RSSetScissorRects(0, NULL); break;
     case SET_STENCIL: m_ReplayList->Serialise_OMSetStencilRef(0); break;
@@ -356,6 +375,7 @@ void WrappedID3D12CommandQueue::ProcessChunk(uint64_t offset, D3D12ChunkType chu
 
     case EXECUTE_CMD_LISTS: Serialise_ExecuteCommandLists(0, NULL); break;
     case SIGNAL: Serialise_Signal(NULL, 0); break;
+    case WAIT: Serialise_Wait(NULL, 0); break;
     case CONTEXT_CAPTURE_FOOTER:
     {
       SERIALISE_ELEMENT(ResourceId, bbid, ResourceId());
@@ -793,9 +813,6 @@ void D3D12CommandData::AddEvent(D3D12ChunkType type, string description)
     memcpy(apievent.callstack.elems, stack->GetAddrs(), sizeof(uint64_t) * stack->NumLevels());
   }
 
-  D3D12NOTIMP("debug messages");
-  vector<DebugMessage> m_EventMessages;
-
   for(size_t i = 0; i < m_EventMessages.size(); i++)
     m_EventMessages[i].eventID = apievent.eventID;
 
@@ -812,12 +829,180 @@ void D3D12CommandData::AddEvent(D3D12ChunkType type, string description)
     m_RootEvents.push_back(apievent);
     m_Events.push_back(apievent);
 
-    D3D12NOTIMP("debug messages");
-    // m_DebugMessages.insert(m_DebugMessages.end(), m_EventMessages.begin(),
-    // m_EventMessages.end());
+    for(auto it = m_EventMessages.begin(); it != m_EventMessages.end(); ++it)
+      m_pDevice->AddDebugMessage(*it);
   }
 
   m_EventMessages.clear();
+}
+
+void D3D12CommandData::AddUsage(D3D12DrawcallTreeNode &drawNode, ResourceId id, uint32_t EID,
+                                ResourceUsage usage)
+{
+  if(id == ResourceId())
+    return;
+
+  drawNode.resourceUsage.push_back(std::make_pair(id, EventUsage(EID, usage)));
+}
+
+void D3D12CommandData::AddUsage(D3D12DrawcallTreeNode &drawNode)
+{
+  FetchDrawcall &d = drawNode.draw;
+
+  const BakedCmdListInfo::CmdListState &state = m_BakedCmdListInfo[m_LastCmdListID].state;
+  uint32_t e = d.eventID;
+
+  if((d.flags & (eDraw_Drawcall | eDraw_Dispatch)) == 0)
+    return;
+
+  const BakedCmdListInfo::CmdListState::RootSignature *rootdata = NULL;
+
+  if((d.flags & eDraw_Dispatch) && state.compute.rootsig != ResourceId())
+  {
+    rootdata = &state.compute;
+  }
+  else if(state.graphics.rootsig != ResourceId())
+  {
+    rootdata = &state.graphics;
+
+    if(d.flags & eDraw_UseIBuffer && state.ibuffer != ResourceId())
+      drawNode.resourceUsage.push_back(
+          std::make_pair(state.ibuffer, EventUsage(e, eUsage_IndexBuffer)));
+
+    for(size_t i = 0; i < state.vbuffers.size(); i++)
+    {
+      if(state.vbuffers[i] != ResourceId())
+        drawNode.resourceUsage.push_back(
+            std::make_pair(state.vbuffers[i], EventUsage(e, eUsage_VertexBuffer)));
+    }
+
+    for(size_t i = 0; i < state.sotargets.size(); i++)
+    {
+      if(state.sotargets[i] != ResourceId())
+        drawNode.resourceUsage.push_back(std::make_pair(state.sotargets[i], EventUsage(e, eUsage_SO)));
+    }
+
+    for(size_t i = 0; i < state.socounters.size(); i++)
+    {
+      if(state.socounters[i] != ResourceId())
+        drawNode.resourceUsage.push_back(
+            std::make_pair(state.socounters[i], EventUsage(e, eUsage_SO)));
+    }
+
+    for(size_t i = 0; i < ARRAY_COUNT(state.rts); i++)
+    {
+      if(state.rts[i] != ResourceId())
+        drawNode.resourceUsage.push_back(
+            std::make_pair(state.rts[i], EventUsage(e, eUsage_ColourTarget)));
+    }
+
+    if(state.dsv != ResourceId())
+      drawNode.resourceUsage.push_back(
+          std::make_pair(state.dsv, EventUsage(e, eUsage_DepthStencilTarget)));
+  }
+
+  if(rootdata)
+  {
+    WrappedID3D12RootSignature *sig =
+        m_pDevice->GetResourceManager()->GetCurrentAs<WrappedID3D12RootSignature>(rootdata->rootsig);
+
+    for(size_t rootEl = 0; rootEl < sig->sig.params.size(); rootEl++)
+    {
+      if(rootEl >= rootdata->sigelems.size())
+        break;
+
+      const D3D12RootSignatureParameter &p = sig->sig.params[rootEl];
+      const D3D12RenderState::SignatureElement &el = rootdata->sigelems[rootEl];
+
+      ResourceUsage cb = eUsage_CS_Constants;
+      ResourceUsage ro = eUsage_CS_Resource;
+      ResourceUsage rw = eUsage_CS_RWResource;
+
+      if(rootdata == &state.graphics)
+      {
+        if(p.ShaderVisibility == D3D12_SHADER_VISIBILITY_ALL)
+        {
+          cb = eUsage_All_Constants;
+          ro = eUsage_All_Resource;
+          rw = eUsage_All_RWResource;
+        }
+        else
+        {
+          cb = ResourceUsage(eUsage_VS_Constants + p.ShaderVisibility -
+                             D3D12_SHADER_VISIBILITY_VERTEX);
+          ro = ResourceUsage(eUsage_VS_Resource + p.ShaderVisibility - D3D12_SHADER_VISIBILITY_VERTEX);
+          rw = ResourceUsage(eUsage_VS_RWResource + p.ShaderVisibility -
+                             D3D12_SHADER_VISIBILITY_VERTEX);
+        }
+      }
+
+      if(p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_CBV && el.type == eRootCBV)
+      {
+        AddUsage(drawNode, el.id, e, cb);
+      }
+      else if(p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_SRV && el.type == eRootSRV)
+      {
+        AddUsage(drawNode, el.id, e, ro);
+      }
+      else if(p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_UAV && el.type == eRootUAV)
+      {
+        AddUsage(drawNode, el.id, e, rw);
+      }
+      else if(p.ParameterType == D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE && el.type == eRootTable)
+      {
+        WrappedID3D12DescriptorHeap *heap =
+            m_pDevice->GetResourceManager()->GetCurrentAs<WrappedID3D12DescriptorHeap>(el.id);
+
+        if(heap == NULL)
+          continue;
+
+        UINT prevTableOffset = 0;
+
+        for(size_t r = 0; r < p.ranges.size(); r++)
+        {
+          const D3D12_DESCRIPTOR_RANGE &range = p.ranges[r];
+
+          UINT offset = range.OffsetInDescriptorsFromTableStart;
+
+          if(range.OffsetInDescriptorsFromTableStart == D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND)
+            offset = prevTableOffset;
+
+          D3D12Descriptor *desc = (D3D12Descriptor *)heap->GetCPUDescriptorHandleForHeapStart().ptr;
+          desc += el.offset;
+          desc += offset;
+
+          prevTableOffset = offset + range.NumDescriptors;
+
+          if(range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_CBV)
+          {
+            EventUsage usage(e, cb);
+
+            for(UINT i = 0; i < range.NumDescriptors; i++)
+            {
+              ResourceId id =
+                  WrappedID3D12Resource::GetResIDFromAddr(desc->nonsamp.cbv.BufferLocation);
+
+              AddUsage(drawNode, id, e, cb);
+
+              desc++;
+            }
+          }
+          else if(range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV ||
+                  range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_UAV)
+          {
+            ResourceUsage usage = range.RangeType == D3D12_DESCRIPTOR_RANGE_TYPE_SRV ? ro : rw;
+
+            for(UINT i = 0; i < range.NumDescriptors; i++)
+            {
+              AddUsage(drawNode, GetResID(desc->nonsamp.resource), e, usage);
+
+              desc++;
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 void D3D12CommandData::AddDrawcall(const FetchDrawcall &d, bool hasEvents)
@@ -870,7 +1055,8 @@ void D3D12CommandData::AddDrawcall(const FetchDrawcall &d, bool hasEvents)
 
     node.resourceUsage.swap(m_BakedCmdListInfo[m_LastCmdListID].resourceUsage);
 
-    D3D12NOTIMP("event usage");
+    if(m_LastCmdListID != ResourceId())
+      AddUsage(node);
 
     node.children.insert(node.children.begin(), draw.children.elems,
                          draw.children.elems + draw.children.count);
@@ -887,7 +1073,6 @@ void D3D12CommandData::InsertDrawsAndRefreshIDs(vector<D3D12DrawcallTreeNode> &c
   {
     if(cmdBufNodes[i].draw.flags & eDraw_PopMarker)
     {
-      RDCASSERT(GetDrawcallStack().size() > 1);
       if(GetDrawcallStack().size() > 1)
         GetDrawcallStack().pop_back();
 

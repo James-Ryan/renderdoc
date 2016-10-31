@@ -339,6 +339,19 @@ D3D12_GPU_DESCRIPTOR_HANDLE GPUHandleFromPortableHandle(D3D12ResourceManager *ma
   return D3D12_GPU_DESCRIPTOR_HANDLE();
 }
 
+D3D12Descriptor *DescriptorFromPortableHandle(D3D12ResourceManager *manager, PortableHandle handle)
+{
+  if(handle.heap == ResourceId())
+    return NULL;
+
+  WrappedID3D12DescriptorHeap *heap = manager->GetLiveAs<WrappedID3D12DescriptorHeap>(handle.heap);
+
+  if(heap)
+    return heap->GetDescriptors() + handle.index;
+
+  return NULL;
+}
+
 // debugging logging for barriers
 #if 1
 #define BARRIER_DBG RDCLOG
@@ -483,13 +496,19 @@ bool D3D12ResourceManager::Prepare_InitialState(ID3D12DeviceChild *res)
   }
   else if(type == Resource_Resource)
   {
-    ID3D12Resource *r = (ID3D12Resource *)res;
+    WrappedID3D12Resource *r = (WrappedID3D12Resource *)res;
+    ID3D12Pageable *pageable = r;
+
+    bool nonresident = false;
+    if(!r->Resident())
+      nonresident = true;
 
     D3D12_RESOURCE_DESC desc = r->GetDesc();
 
     if(desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D && desc.SampleDesc.Count > 1)
     {
       D3D12NOTIMP("Multisampled initial contents");
+
       SetInitialContents(GetResID(r), D3D12ResourceManager::InitialContentData(NULL, 2, NULL));
       return true;
     }
@@ -518,17 +537,28 @@ bool D3D12ResourceManager::Prepare_InitialState(ID3D12DeviceChild *res)
           &heapProps, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST, NULL,
           __uuidof(ID3D12Resource), (void **)&copyDst);
 
+      if(nonresident)
+        m_Device->MakeResident(1, &pageable);
+
       if(SUCCEEDED(hr))
       {
         ID3D12GraphicsCommandList *list = Unwrap(m_Device->GetNewList());
 
-        list->CopyResource(copyDst, Unwrap(r));
+        list->CopyResource(copyDst, r->GetReal());
 
         list->Close();
       }
       else
       {
         RDCERR("Couldn't create readback buffer: 0x%08x", hr);
+      }
+
+      if(nonresident)
+      {
+        m_Device->ExecuteLists();
+        m_Device->FlushLists();
+
+        m_Device->Evict(1, &pageable);
       }
 
       SetInitialContents(GetResID(r), D3D12ResourceManager::InitialContentData(copyDst, 0, NULL));
@@ -572,6 +602,9 @@ bool D3D12ResourceManager::Prepare_InitialState(ID3D12DeviceChild *res)
           &heapProps, D3D12_HEAP_FLAG_NONE, &bufDesc, D3D12_RESOURCE_STATE_COPY_DEST, NULL,
           __uuidof(ID3D12Resource), (void **)&copyDst);
 
+      if(nonresident)
+        m_Device->MakeResident(1, &pageable);
+
       if(SUCCEEDED(hr))
       {
         ID3D12GraphicsCommandList *list = Unwrap(m_Device->GetNewList());
@@ -590,7 +623,7 @@ bool D3D12ResourceManager::Prepare_InitialState(ID3D12DeviceChild *res)
           D3D12_RESOURCE_BARRIER barrier;
           barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
           barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
-          barrier.Transition.pResource = Unwrap(r);
+          barrier.Transition.pResource = r->GetReal();
           barrier.Transition.Subresource = (UINT)i;
           barrier.Transition.StateBefore = states[i];
           barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
@@ -607,7 +640,7 @@ bool D3D12ResourceManager::Prepare_InitialState(ID3D12DeviceChild *res)
           D3D12_TEXTURE_COPY_LOCATION dst, src;
 
           src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-          src.pResource = Unwrap(r);
+          src.pResource = r->GetReal();
           src.SubresourceIndex = i;
 
           dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
@@ -631,14 +664,25 @@ bool D3D12ResourceManager::Prepare_InitialState(ID3D12DeviceChild *res)
         RDCERR("Couldn't create readback buffer: 0x%08x", hr);
       }
 
+      if(nonresident)
+      {
+        m_Device->ExecuteLists();
+        m_Device->FlushLists();
+
+        m_Device->Evict(1, &pageable);
+      }
+
       SAFE_DELETE_ARRAY(layouts);
 
       SetInitialContents(GetResID(r), D3D12ResourceManager::InitialContentData(copyDst, 0, NULL));
       return true;
     }
   }
+  else
+  {
+    RDCERR("Unexpected type needing an initial state prepared: %d", type);
+  }
 
-  RDCUNIMPLEMENTED("init states");
   return false;
 }
 
@@ -710,7 +754,7 @@ bool D3D12ResourceManager::Serialise_InitialState(ResourceId resid, ID3D12Device
     }
     else
     {
-      RDCUNIMPLEMENTED("init states");
+      RDCERR("Unexpected type needing an initial state serialised out: %d", type);
       return false;
     }
   }
@@ -832,7 +876,7 @@ bool D3D12ResourceManager::Serialise_InitialState(ResourceId resid, ID3D12Device
     }
     else
     {
-      RDCUNIMPLEMENTED("init states");
+      RDCERR("Unexpected type needing an initial state serialised in: %d", type);
       return false;
     }
   }
@@ -852,13 +896,13 @@ void D3D12ResourceManager::Create_InitialState(ResourceId id, ID3D12DeviceChild 
   }
   else if(type == Resource_Resource)
   {
-    D3D12NOTIMP("resource init states");
+    D3D12NOTIMP("Creating init states for resources");
 
     // not handling any missing states at the moment
   }
   else
   {
-    RDCUNIMPLEMENTED("init states");
+    RDCERR("Unexpected type needing an initial state created: %d", type);
   }
 }
 
@@ -1060,11 +1104,11 @@ void D3D12ResourceManager::Apply_InitialState(ID3D12DeviceChild *live, InitialCo
     }
     else
     {
-      D3D12NOTIMP("resource init states");
+      RDCERR("Unexpected num or NULL resource: %d, %p", data.num, data.resource);
     }
   }
   else
   {
-    RDCUNIMPLEMENTED("init states");
+    RDCERR("Unexpected type needing an initial state created: %d", type);
   }
 }
